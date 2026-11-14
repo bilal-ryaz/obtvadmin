@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OrbitTV — Reseller &amp; Admin Portal</title>
-    <link rel="preconnect" href="https://googleapis.com" />
-    <link rel="preconnect" href="https://gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <script src="https://tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
         darkMode: 'class',
@@ -38,25 +38,27 @@
   <body class="min-h-screen bg-[#0B0D12] text-slate-100 antialiased">
     <div id="app" class="min-h-screen flex flex-col"></div>
 
+    <!-- Modal Root -->
     <div
       id="modal-root"
       class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
     ></div>
 
+    <!-- Toast -->
     <div
       id="toast"
       class="hidden fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-lg bg-[#1A2133] border border-slate-700 text-sm text-slate-100 shadow-xl"
     ></div>
 
     <script type="module">
-      import { initializeApp } from 'https://gstatic.com';
+      import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js';
       import {
         getAuth,
         onAuthStateChanged,
         signInWithEmailAndPassword,
         createUserWithEmailAndPassword,
         signOut,
-      } from 'https://gstatic.com';
+      } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js';
       import {
         getFirestore,
         collection,
@@ -75,11 +77,11 @@
         writeBatch,
         serverTimestamp,
         Timestamp,
-      } from 'https://gstatic.com';
+      } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-firestore.js';
 
       const firebaseConfig = {
         apiKey: 'AIzaSyCyWX0D8Ik9xRH4Jy-m08nD2pdZ-dAxMlw',
-        authDomain: '://firebaseapp.com',
+        authDomain: 'obtv-1d03d.firebaseapp.com',
         projectId: 'obtv-1d03d',
         storageBucket: 'obtv-1d03d.firebasestorage.app',
         messagingSenderId: '693621962787',
@@ -95,8 +97,9 @@
         user: null,
         staff: null,
         workspaceBootstrapped: true,
-        tab: 'activations',
-        authMode: 'signin',
+        pendingSignup: false,
+        tab: 'activations', // 'activations' | 'resellers' | 'settings' | 'logs'
+        authMode: 'signin', // 'signin' | 'signup'
         authError: '',
         authBusy: false,
         loading: false,
@@ -142,7 +145,7 @@
           crypto.getRandomValues(bytes);
           return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
         };
-        return 'ORBT-' + seg(4) + '-' + seg(4);
+        return `ORBT-${seg(4)}-${seg(4)}`;
       }
 
       function parseDate(val) {
@@ -209,6 +212,25 @@
         }
       }
 
+      async function requestAccess() {
+        const email = state.user.email || '';
+        const data = {
+          uid: state.user.uid,
+          email,
+          name: email.split('@')[0] || 'Reseller',
+          role: 'reseller',
+          credits: 0,
+          status: 'pending',
+        };
+        await setDoc(doc(db, 'resellers', state.user.uid), {
+          ...data,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        state.staff = { ...data };
+        await writeLog('access_request', `Access requested by ${email}`);
+      }
+
       async function loadData() {
         if (!state.user || !state.staff || state.staff.status !== 'active') return;
         state.loading = true;
@@ -237,13 +259,7 @@
 
           if (isAdmin) {
             const resSnap = await getDocs(collection(db, 'resellers'));
-            state.resellers = resSnap.docs
-              .map((d) => ({ id: d.id, ...d.data() }))
-              .sort((a, b) => {
-                if (a.status === 'pending' && b.status !== 'pending') return -1;
-                if (a.status !== 'pending' && b.status === 'pending') return 1;
-                return (parseDate(b.createdAt)?.getTime() || 0) - (parseDate(a.createdAt)?.getTime() || 0);
-              });
+            state.resellers = resSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
           } else {
             state.resellers = [];
           }
@@ -264,6 +280,7 @@
             const logSnap = await getDocs(logQ);
             state.logs = logSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
           } catch {
+            // Fallback without composite index if needed
             const fallbackQ = isAdmin
               ? query(collection(db, 'activity_logs'), limit(50))
               : query(
@@ -306,686 +323,1257 @@
           if (cfgSnap.exists()) {
             state.config = { ...state.config, ...cfgSnap.data() };
           }
-          if (staffSnap.exists()) {
-state.staff = staffSnap.data();
-} else if (state.workspaceBootstrapped) {
-const defaultName = user.email ? user.email.split('@')[0] : 'Reseller';
-const pendingProfile = {
-uid: user.uid,
-email: user.email || '',
-name: defaultName,
-role: 'reseller',
-credits: 0,
-status: 'pending',
-createdAt: serverTimestamp(),
-updatedAt: serverTimestamp(),
-};
-await setDoc(doc(db, 'resellers', user.uid), pendingProfile);
-state.staff = pendingProfile;
-}
-} catch (err) {
-state.authError = err.message || 'Could not verify account permissions.';
-}
-state.authReady = true;
-render();
-if (state.staff && state.staff.status === 'active') {
-loadData();
-}
-});
-function closeModal() {
-modalRoot.classList.add('hidden');
-modalRoot.innerHTML = '';
-}
-function openActivationModal(existing = null) {
-const isEdit = Boolean(existing);
-const code = existing ? existing.code : generateCode();
-const defaultExpiry = existing
-? formatDate(existing.expiresAt)
-: formatDate(addDurationToDate(new Date(), 1));
-modalRoot.innerHTML = `
-
-
-
-${isEdit ? 'Edit Activation — ' + esc(code) : 'New Customer Activation'}
-
-Close
-
-
-Activation Code
-<input id="f-code" type="text" value="${esc(code)}" ${isEdit ? 'readonly' : ''} required class="flex-1 rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono uppercase text-white focus:outline-none focus:border-[#6C8CFF]" />
-${isEdit ? '' : 'Regenerate'}
-
-
-
-Customer Name
-Max Devices
-Xtream Username
-Xtream Password
-Provider Server URL (optional — uses global default if blank)
-Plan Preset
-<option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial
-<option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month
-<option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months
-<option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months
-<option value="12 Months" ${existing?.planLabel === '12 Months' ? 'selected' : ''}>12 Months
-<option value="Custom" ${existing?.planLabel === 'Custom' ? 'selected' : ''}>Custom
-
-
-Expiration Date
-Notes
-Cancel
-${isEdit ? 'Save Changes' : 'Create Activation'}
-
-
-
-`;
-modalRoot.classList.remove('hidden');
-document.getElementById('m-close').onclick = closeModal;
-document.getElementById('m-cancel').onclick = closeModal;
-const regenBtn = document.getElementById('f-regen');
-if (regenBtn) regenBtn.onclick = () => { document.getElementById('f-code').value = generateCode(); };
-const planSel = document.getElementById('f-plan');
-const expInput = document.getElementById('f-expiry');
-planSel.onchange = () => {
-const val = planSel.value;
-const now = new Date();
-if (val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
-else if (val === '1 Month') expInput.value = formatDate(addDurationToDate(now, 1));
-else if (val === '3 Months') expInput.value = formatDate(addDurationToDate(now, 3));
-else if (val === '6 Months') expInput.value = formatDate(addDurationToDate(now, 6));
-else if (val === '12 Months') expInput.value = formatDate(addDurationToDate(now, 12));
-};
-document.getElementById('m-form').onsubmit = async (e) => {
-e.preventDefault();
-const saveBtn = document.getElementById('m-save');
-saveBtn.disabled = true;
-saveBtn.textContent = 'Saving...';
-const cleanCode = document.getElementById('f-code').value.trim().toUpperCase();
-const expRaw = document.getElementById('f-expiry').value;
-const expDate = expRaw ? new Date(expRaw + 'T23:59:59') : null;
-const payload = {
-code: cleanCode,
-customerName: document.getElementById('f-customer').value.trim(),
-server: document.getElementById('f-server').value.trim(),
-username: document.getElementById('f-user').value.trim(),
-password: document.getElementById('f-pass').value.trim(),
-planLabel: document.getElementById('f-plan').value,
-status: existing ? existing.status : 'active',
-expiresAt: expDate ? Timestamp.fromDate(expDate) : null,
-maxDevices: Math.max(1, Math.min(10, Number(document.getElementById('f-devices').value) || 1)),
-boundDevices: existing?.boundDevices || [],
-resellerUid: existing ? existing.resellerUid : state.user.uid,
-resellerEmail: existing ? existing.resellerEmail : state.user.email || '',
-notes: document.getElementById('f-notes').value.trim(),
-updatedAt: serverTimestamp(),
-};
-try {
-if (isEdit) {
-await updateDoc(doc(db, 'activations', cleanCode), payload);
-await writeLog('update_activation', 'Updated activation for ' + payload.customerName, cleanCode);
-showToast('Updated ' + cleanCode);
-} else {
-if (!payload.server && !state.config.defaultServer) {
-throw new Error('Provide a Server URL or set a global Default Server in Settings.');
-}
-await runTransaction(db, async (tx) => {
-const actRef = doc(db, 'activations', cleanCode);
-const actSnap = await tx.get(actRef);
-if (actSnap.exists()) {
-throw new Error('Code ' + cleanCode + ' already exists. Regenerate and try again.');
-}
-if (state.staff.role !== 'admin') {
-const resRef = doc(db, 'resellers', state.user.uid);
-const resSnap = await tx.get(resRef);
-const currentCredits = resSnap.data()?.credits ?? 0;
-if (currentCredits < 1) {
-throw new Error('Insufficient credits. Ask an admin to top up your balance.');
-}
-tx.update(resRef, { credits: currentCredits - 1, updatedAt: serverTimestamp() });
-}
-tx.set(actRef, { ...payload, createdAt: serverTimestamp() });
-});
-if (state.staff.role !== 'admin') {
-state.staff.credits = Math.max(0, (state.staff.credits || 0) - 1);
-}
-await writeLog('create_activation', 'Issued ' + payload.planLabel + ' for ' + payload.customerName, cleanCode);
-showToast('Created activation ' + cleanCode);
-}
-closeModal();
-await loadData();
-} catch (err) {
-showToast(err.message || 'Failed to save activation');
-saveBtn.disabled = false;
-saveBtn.textContent = isEdit ? 'Save Changes' : 'Create Activation';
-}
-};
-}
-function openResellerModal(existing = null) {
-const isEdit = Boolean(existing);
-modalRoot.innerHTML = `
-
-
-${isEdit ? 'Edit Reseller' : 'Provision Reseller'}
-Close
-
-
-Firebase Auth UID
-<input id="r-uid" type="text" required ${isEdit ? 'readonly' : ''} value="${esc(existing?.uid || '')}" placeholder="Paste user's UID" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]" />
-
-Email
-Display Name
-Role
-<option value="reseller" ${existing?.role !== 'admin' ? 'selected' : ''}>Reseller
-<option value="admin" ${existing?.role === 'admin' ? 'selected' : ''}>Admin
-
-
-Credits
-Status
-<option value="active" ${existing?.status === 'active' ? 'selected' : ''}>Active
-<option value="pending" ${existing?.status === 'pending' ? 'selected' : ''}>Pending
-<option value="disabled" ${existing?.status === 'disabled' ? 'selected' : ''}>Disabled
-
-
-
-
-Cancel
-Save
-
-
-
-`;
-modalRoot.classList.remove('hidden');
-document.getElementById('r-close').onclick = closeModal;
-document.getElementById('r-cancel').onclick = closeModal;
-document.getElementById('r-form').onsubmit = async (e) => {
-e.preventDefault();
-const uid = document.getElementById('r-uid').value.trim();
-const data = {
-uid,
-email: document.getElementById('r-email').value.trim(),
-name: document.getElementById('r-name').value.trim(),
-role: document.getElementById('r-role').value,
-credits: Math.max(0, Number(document.getElementById('r-credits').value) || 0),
-status: document.getElementById('r-status').value,
-updatedAt: serverTimestamp(),
-};
-try {
-if (isEdit) {
-await updateDoc(doc(db, 'resellers', uid), data);
-await writeLog('update_reseller', 'Updated reseller ' + data.email + ' (' + data.credits + ' credits)');
-} else {
-await setDoc(doc(db, 'resellers', uid), { ...data, createdAt: serverTimestamp() });
-await writeLog('update_reseller', 'Provisioned reseller ' + data.email + ' (' + data.credits + ' credits)');
-}
-closeModal();
-showToast('Reseller saved');
-await loadData();
-} catch (err) {
-showToast(err.message || 'Could not save reseller');
-}
-};
-}
-function filteredActivations() {
-const q = state.search.trim().toLowerCase();
-return state.activations.filter((item) => {
-const st = effectiveStatus(item);
-if (state.statusFilter !== 'all' && st !== state.statusFilter) return false;
-if (!q) return true;
-return (
-(item.code || '').toLowerCase().includes(q) ||
-(item.customerName || '').toLowerCase().includes(q) ||
-(item.username || '').toLowerCase().includes(q) ||
-(item.resellerEmail || '').toLowerCase().includes(q)
-);
-});
-}
-function renderAuthScreen() {
-const isSignup = state.authMode === 'signup';
-appEl.innerHTML = `
-
-
-
-obtv-1d03d
-OrbitTV Reseller Portal
-
-${isSignup ? 'Request a reseller account (requires Super Admin approval).' : 'Sign in with your reseller or admin credentials.'}
-
-
-
-Email Address
-Password
-${state.authError ? '' + esc(state.authError) + '' : ''}
-<button type="submit" ${state.authBusy ? 'disabled' : ''} class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] disabled:opacity-50 py-2.5 text-sm font-semibold text-slate-950 transition-colors">
-${state.authBusy ? 'Please wait...' : isSignup ? 'Request Account' : 'Sign In'}
-
-
-
-${isSignup ? 'Already have an account?' : 'New reseller?'}
-${isSignup ? 'Sign In' : 'Request Account'}
-
-
-
-`;
-document.getElementById('toggle-auth').onclick = () => {
-state.authMode = isSignup ? 'signin' : 'signup';
-state.authError = '';
-render();
-};
-document.getElementById('auth-form').onsubmit = async (e) => {
-e.preventDefault();
-const email = document.getElementById('a-email').value.trim();
-const pass = document.getElementById('a-pass').value;
-state.authBusy = true;
-state.authError = '';
-render();
-try {
-if (isSignup) await createUserWithEmailAndPassword(auth, email, pass);
-else await signInWithEmailAndPassword(auth, email, pass);
-} catch (err) {
-state.authError = err.message || 'Authentication failed.';
-} finally {
-state.authBusy = false;
-render();
-}
-};
-}
-function renderOnboardingOrPending() {
-const canBootstrap = !state.workspaceBootstrapped;
-const isDisabled = state.staff?.status === 'disabled';
-appEl.innerHTML = <main class="flex-1 flex items-center justify-center p-6"> <div class="w-full max-w-lg rounded-xl bg-[#131722] border border-slate-800 p-8 space-y-5"> <div> <h1 class="text-xl font-bold text-white"> ${canBootstrap ? 'Initialize OrbitTV Portal' : isDisabled ? 'Account Disabled' : 'Approval Pending'} </h1> <p class="text-sm text-slate-400 mt-1">Signed in as <span class="text-slate-200 font-medium">${esc(state.user.email)}</span></p> </div> ${ canBootstrap ?
-
-No workspace configuration exists yet on obtv-1d03d.
-Initialize the portal now to claim Super Admin access.
-
-Initialize Workspace as Super Admin
-:
-
-${isDisabled ? 'Your reseller request was rejected or suspended by the Super Admin.' : 'Your reseller account request has been automatically sent to the Super Admin.'}
-${isDisabled ? 'Contact the administrator for details.' : 'Once the Super Admin approves your request, click Refresh Status below to access your dashboard.'}
-${!isDisabled ? 'Refresh Status' : ''}
-
-} <div class="pt-2 flex justify-end"><button id="btn-signout" class="text-xs text-slate-400 hover:text-white">Sign Out</button></div> </div> </main>;
-document.getElementById('btn-signout').onclick = () => signOut(auth);
-const checkBtn = document.getElementById('btn-check-status');
-if (checkBtn) checkBtn.onclick = () => window.location.reload();
-const bootBtn = document.getElementById('btn-bootstrap');
-if (bootBtn) {
-bootBtn.onclick = async () => {
-bootBtn.disabled = true;
-bootBtn.textContent = 'Initializing...';
-try {
-const adminName = state.user.email ? state.user.email.split('@')[0] : 'Admin';
-const batch = writeBatch(db);
-batch.set(doc(db, 'config', 'app'), {
-appName: 'OrbitTV',
-defaultServer: '',
-allowDirectLogin: true,
-announcement: '',
-supportContact: '',
-updatedAt: serverTimestamp(),
-updatedBy: state.user.uid,
-});
-batch.set(doc(db, 'resellers', state.user.uid), {
-uid: state.user.uid,
-email: state.user.email || '',
-name: adminName,
-role: 'admin',
-credits: 9999,
-status: 'active',
-createdAt: serverTimestamp(),
-updatedAt: serverTimestamp(),
-});
-await batch.commit();
-state.workspaceBootstrapped = true;
-state.staff = {
-uid: state.user.uid,
-email: state.user.email || '',
-name: adminName,
-role: 'admin',
-credits: 9999,
-status: 'active',
-};
-await writeLog('bootstrap_admin', 'Initialized workspace as Super Admin (' + state.user.email + ')');
-showToast('Workspace initialized');
-render();
-loadData();
-} catch (err) {
-showToast(err.message || 'Bootstrap failed. Check Firestore rules.');
-bootBtn.disabled = false;
-bootBtn.textContent = 'Initialize Workspace as Super Admin';
-}
-};
-}
-}
-function renderActivationsTab() {
-const list = filteredActivations();
-const total = state.activations.length;
-const activeCount = state.activations.filter((a) => effectiveStatus(a) === 'active').length;
-const soonCount = state.activations.filter((a) => effectiveStatus(a) === 'active' && isExpiringSoon(a)).length;
-const rowsHtml = list.length === 0
-? '' + (state.loading ? 'Loading activations...' : 'No matching activations found.') + ''
-: list.map((item) => {
-const st = effectiveStatus(item);
-const stClass = st === 'active' ? 'text-emerald-400' : st === 'expired' ? 'text-amber-400' : 'text-red-400';
-const stLabel = st === 'active' ? 'Active' : st === 'expired' ? 'Expired' : 'Suspended';
-const bound = Array.isArray(item.boundDevices) ? item.boundDevices.length : 0;
-return `
-\({bound} / \){esc(item.maxDevices || 1)}
-${bound > 0 ? 'Reset' : ''}${stLabel}`;
-}).join('');
-return <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6"> <div class="rounded-xl bg-[#131722] border border-slate-800 p-4"> <div class="text-xs text-slate-400">Total Activations</div> <div class="text-2xl font-bold tabular-nums text-white mt-1">${total}</div> </div> <div class="rounded-xl bg-[#131722] border border-slate-800 p-4"> <div class="text-xs text-slate-400">Active Subscriptions</div> <div class="text-2xl font-bold tabular-nums text-emerald-400 mt-1">${activeCount}</div> </div> <div class="rounded-xl bg-[#131722] border border-slate-800 p-4"> <div class="text-xs text-slate-400">Expiring Within 7 Days</div> <div class="text-2xl font-bold tabular-nums text-amber-400 mt-1">${soonCount}</div> </div> <div class="rounded-xl bg-[#131722] border border-slate-800 p-4"> <div class="text-xs text-slate-400">${state.staff.role === 'admin' ? 'Role' : 'Available Credits'}</div> <div class="text-2xl font-bold tabular-nums text-[#6C8CFF] mt-1">${state.staff.role === 'admin' ? 'Super Admin' : esc(state.staff.credits)}</div> </div> </div> <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4"> <div class="flex flex-wrap items-center gap-2"> <input id="search-input" type="search" value="${esc(state.search)}" placeholder="Search code, customer, username..." class="w-64 rounded-lg bg-[#131722] border border-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-[#6C8CFF]" /> <div class="inline-flex rounded-lg bg-[#131722] border border-slate-800 p-1"> ${['all', 'active', 'expired', 'suspended'] .map((st) =>${st}`)
-.join('')}
-
-
-
-Export CSV
-New Activation
-
-
-
-${rowsHtml}
-
-Activation Code	Customer	Xtream Account	Plan & Expiry	Devices	Status	Actions
-
-`;
-}
-function renderResellersTab() {
-const rowsHtml = state.resellers.map((r) => {
-const statusColor = r.status === 'active'
-? 'text-emerald-400'
-: r.status === 'pending'
-? 'text-amber-400'
-: 'text-red-400';
-const actionsHtml = r.status === 'pending'
-? <button data-approve-reseller="${esc(r.uid)}" class="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 font-semibold">Approve (+25 Credits)</button> <button data-reject-reseller="${esc(r.uid)}" class="px-2.5 py-1 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30">Reject</button>
-: <button data-topup="${esc(r.uid)}" class="text-emerald-400 hover:underline">+10 Credits</button> <button data-edit-reseller="${esc(r.uid)}" class="text-[#6C8CFF] hover:underline">Edit</button>;
-return `
-${esc(r.role)}${esc(r.credits)}${esc(r.status)}${actionsHtml}`;
-}).join('');
-return `
-
-
-Resellers & Approval Requests
-Approve or reject incoming reseller sign-ups and manage credit balances.
-
-Add Reseller
-
-
-${rowsHtml}
-
-Name & Email	Role	Credits	Status	Actions
-
-`;
-}
-function renderSettingsTab() {
-const c = state.config;
-return `
-
-Remote App Configuration
-Changes published here are fetched automatically by the OrbitTV Flutter app on startup.
-
-Global Default Xtream Server URL
-In-App Announcement Banner
-${esc(c.announcement || '')}
-
-Support Contact Line
-Save Remote Config
-
-
-
-`;
-}
-function renderLogsTab() {
-const rowsHtml = state.logs.length === 0
-? 'No activity recorded yet.'
-: state.logs.map((l) => `
-${esc(formatDateTime(l.createdAt))}
-${esc(l.actorEmail)}${esc(l.action)}${esc(l.targetCode || '—')}${esc(l.details)}`).join('');
-return `
-
-
-Recent Activity Log
-${state.logs.length} entries
-
-${rowsHtml}
-
-Timestamp	Actor	Action	Code	Details
-
-`;
-}
-function renderDashboard() {
-const isAdmin = state.staff.role === 'admin';
-const pendingCount = isAdmin ? state.resellers.filter((r) => r.status === 'pending').length : 0;
-const tabs = [
-{ id: 'activations', label: 'Activations' },
-...(isAdmin
-? [
-{
-id: 'resellers',
-label: pendingCount > 0 ? 'Resellers (' + pendingCount + ' Pending)' : 'Resellers',
-},
-{ id: 'settings', label: 'App Config' },
-]
-: []),
-{ id: 'logs', label: 'Activity Log' },
-];
-let bodyHtml = '';
-if (state.tab === 'activations') bodyHtml = renderActivationsTab();
-else if (state.tab === 'resellers' && isAdmin) bodyHtml = renderResellersTab();
-else if (state.tab === 'settings' && isAdmin) bodyHtml = renderSettingsTab();
-else bodyHtml = renderLogsTab();
-const navHtml = tabs.map((t) => <button data-tab="${t.id}" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${state.tab === t.id ? 'bg-[#6C8CFF]/15 text-[#6C8CFF]' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}">${t.label}</button>).join('');
-appEl.innerHTML = `
-
-
-
-
-OrbitTV
-Reseller Console — obtv-1d03d
-
-
-${navHtml}
-
-
-
-${esc(state.staff.name || state.user.email)}
-${esc(state.user.email)}
-Sign Out
-
-
-OrbitTV / ${esc(state.tab)}
-Refresh
-
-${bodyHtml}
-
-
-`;
-document.getElementById('btn-signout').onclick = () => signOut(auth);
-document.getElementById('btn-refresh').onclick = () => loadData();
-document.querySelectorAll('[data-tab]').forEach((btn) => {
-btn.onclick = () => { state.tab = btn.dataset.tab; render(); };
-});
-const searchEl = document.getElementById('search-input');
-if (searchEl) {
-searchEl.oninput = (e) => {
-state.search = e.target.value;
-const pos = e.target.selectionStart;
-render();
-const next = document.getElementById('search-input');
-if (next) { next.focus(); next.setSelectionRange(pos, pos); }
-};
-}
-document.querySelectorAll('[data-status-filter]').forEach((btn) => {
-btn.onclick = () => { state.statusFilter = btn.dataset.statusFilter; render(); };
-});
-const newActBtn = document.getElementById('btn-new-activation');
-if (newActBtn) newActBtn.onclick = () => openActivationModal();
-const exportBtn = document.getElementById('btn-export-csv');
-if (exportBtn) {
-exportBtn.onclick = () => {
-const rows = filteredActivations();
-const header = ['Code', 'Customer', 'Username', 'Server', 'Plan', 'Expires', 'Status', 'Devices'];
-const lines = [
-header.join(','),
-...rows.map((r) => [r.code, r.customerName, r.username, r.server || state.config.defaultServer, r.planLabel, formatDate(r.expiresAt), effectiveStatus(r), (r.boundDevices || []).length + '/' + (r.maxDevices || 1)].map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')),
-];
-const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-const url = URL.createObjectURL(blob);
-const a = document.createElement('a');
-a.href = url;
-a.download = 'orbittv-activations-' + new Date().toISOString().slice(0, 10) + '.csv';
-a.click();
-URL.revokeObjectURL(url);
-};
-}
-document.querySelectorAll('[data-copy-code]').forEach((btn) => {
-btn.onclick = () => { navigator.clipboard.writeText(btn.dataset.copyCode); showToast('Copied ' + btn.dataset.copyCode); };
-});
-document.querySelectorAll('[data-copy-msg]').forEach((btn) => {
-btn.onclick = () => {
-const item = state.activations.find((a) => a.code === btn.dataset.copyMsg);
-if (!item) return;
-const msg = 'OrbitTV Activation\nCustomer: ' + item.customerName + '\nCode: ' + item.code + '\nPlan: ' + item.planLabel + ' (Expires ' + formatDate(item.expiresAt) + ')\nDevices: ' + (item.maxDevices || 1) + '\n\nOpen OrbitTV and enter your Activation Code to start watching.';
-navigator.clipboard.writeText(msg);
-showToast('Customer invite message copied');
-};
-});
-document.querySelectorAll('[data-edit]').forEach((btn) => {
-btn.onclick = () => { const item = state.activations.find((a) => a.code === btn.dataset.edit); if (item) openActivationModal(item); };
-});
-document.querySelectorAll('[data-extend]').forEach((btn) => {
-btn.onclick = async () => {
-const code = btn.dataset.extend;
-const item = state.activations.find((a) => a.code === code);
-if (!item) return;
-const cur = parseDate(item.expiresAt);
-const base = cur && cur.getTime() > Date.now() ? cur : new Date();
-const next = addDurationToDate(base, 1);
-try {
-await updateDoc(doc(db, 'activations', code), { expiresAt: Timestamp.fromDate(next), status: 'active', updatedAt: serverTimestamp() });
-await writeLog('extend_activation', 'Extended by 1 month to ' + formatDate(next), code);
-showToast('Extended ' + code + ' to ' + formatDate(next));
-await loadData();
-} catch (err) { showToast(err.message || 'Extend failed'); }
-};
-});
-document.querySelectorAll('[data-reset-dev]').forEach((btn) => {
-btn.onclick = async () => {
-const code = btn.dataset.resetDev;
-try {
-await updateDoc(doc(db, 'activations', code), { boundDevices: [], updatedAt: serverTimestamp() });
-await writeLog('reset_devices', 'Cleared all bound devices', code);
-showToast('Reset bound devices for ' + code);
-await loadData();
-} catch (err) { showToast(err.message || 'Reset failed'); }
-};
-});
-document.querySelectorAll('[data-toggle-status]').forEach((btn) => {
-btn.onclick = async () => {
-const code = btn.dataset.toggleStatus;
-const item = state.activations.find((a) => a.code === code);
-if (!item) return;
-const nextStatus = item.status === 'suspended' ? 'active' : 'suspended';
-try {
-await updateDoc(doc(db, 'activations', code), { status: nextStatus, updatedAt: serverTimestamp() });
-await writeLog(nextStatus === 'suspended' ? 'suspend_activation' : 'reactivate_activation', 'Set status to ' + nextStatus, code);
-showToast(code + ' is now ' + nextStatus);
-await loadData();
-} catch (err) { showToast(err.message || 'Status update failed'); }
-};
-});
-document.querySelectorAll('[data-delete]').forEach((btn) => {
-btn.onclick = async () => {
-const code = btn.dataset.delete;
-try {
-await deleteDoc(doc(db, 'activations', code));
-await writeLog('delete_activation', 'Deleted activation record', code);
-showToast('Deleted ' + code);
-await loadData();
-} catch (err) { showToast(err.message || 'Delete failed'); }
-};
-});
-const newResBtn = document.getElementById('btn-new-reseller');
-if (newResBtn) newResBtn.onclick = () => openResellerModal();
-document.querySelectorAll('[data-edit-reseller]').forEach((btn) => {
-btn.onclick = () => { const r = state.resellers.find((x) => x.uid === btn.dataset.editReseller); if (r) openResellerModal(r); };
-});
-document.querySelectorAll('[data-approve-reseller]').forEach((btn) => {
-btn.onclick = async () => {
-const uid = btn.dataset.approveReseller;
-const r = state.resellers.find((x) => x.uid === uid);
-if (!r) return;
-try {
-await updateDoc(doc(db, 'resellers', uid), {
-status: 'active',
-credits: (Number(r.credits) || 0) + 25,
-updatedAt: serverTimestamp(),
-});
-await writeLog('approve_reseller', 'Approved reseller ' + r.email + ' with 25 credits');
-showToast('Approved ' + r.email);
-await loadData();
-} catch (err) { showToast(err.message || 'Approval failed'); }
-};
-});
-document.querySelectorAll('[data-reject-reseller]').forEach((btn) => {
-btn.onclick = async () => {
-const uid = btn.dataset.rejectReseller;
-const r = state.resellers.find((x) => x.uid === uid);
-if (!r) return;
-try {
-await updateDoc(doc(db, 'resellers', uid), {
-status: 'disabled',
-updatedAt: serverTimestamp(),
-});
-await writeLog('reject_reseller', 'Rejected reseller request for ' + r.email);
-showToast('Rejected ' + r.email);
-await loadData();
-} catch (err) { showToast(err.message || 'Reject failed'); }
-};
-});
-document.querySelectorAll('[data-topup]').forEach((btn) => {
-btn.onclick = async () => {
-const uid = btn.dataset.topup;
-const r = state.resellers.find((x) => x.uid === uid);
-if (!r) return;
-const nextCredits = (Number(r.credits) || 0) + 10;
-try {
-await updateDoc(doc(db, 'resellers', uid), { credits: nextCredits, updatedAt: serverTimestamp() });
-await writeLog('update_reseller', 'Added 10 credits to ' + r.email + ' (total ' + nextCredits + ')');
-showToast('Added 10 credits to ' + r.name);
-await loadData();
-} catch (err) { showToast(err.message || 'Top-up failed'); }
-};
-});
-const cfgForm = document.getElementById('settings-form');
-if (cfgForm) {
-cfgForm.onsubmit = async (e) => {
-e.preventDefault();
-const payload = {
-appName: 'OrbitTV',
-defaultServer: document.getElementById('cfg-server').value.trim(),
-announcement: document.getElementById('cfg-announcement').value.trim(),
-supportContact: document.getElementById('cfg-support').value.trim(),
-allowDirectLogin: document.getElementById('cfg-direct').checked,
-updatedAt: serverTimestamp(),
-updatedBy: state.user.uid,
-};
-try {
-await setDoc(doc(db, 'config', 'app'), payload, { merge: true });
-state.config = { ...state.config, ...payload };
-await writeLog('update_config', 'Updated global remote configuration');
-showToast('Remote configuration saved');
-} catch (err) { showToast(err.message || 'Failed to save config'); }
-};
-}
-}
-function render() {
-if (!state.authReady) {
-appEl.innerHTML = 'Connecting to OrbitTV Firebase...';
-return;
-}
-if (!state.user) { renderAuthScreen(); return; }
-if (!state.staff || state.staff.status !== 'active') { renderOnboardingOrPending(); return; }
-renderDashboard();
-}
-render();
+          state.staff = staffSnap.exists() ? staffSnap.data() : null;
+          if (!state.staff && state.pendingSignup && state.workspaceBootstrapped) {
+            try {
+              await requestAccess();
+            } catch (e) {
+              console.warn('Access request failed:', e);
+            }
+          }
+          state.pendingSignup = false;
+        } catch (err) {
+          state.authError = err.message || 'Could not verify account permissions.';
+        }
+        state.authReady = true;
+        render();
+        if (state.staff && state.staff.status === 'active') {
+          loadData();
+        }
+      });
+
+      function closeModal() {
+        modalRoot.classList.add('hidden');
+        modalRoot.innerHTML = '';
+      }
+
+      function openActivationModal(existing = null) {
+        const isEdit = Boolean(existing);
+        const code = existing ? existing.code : generateCode();
+        const defaultExpiry = existing
+          ? formatDate(existing.expiresAt)
+          : formatDate(addDurationToDate(new Date(), 1));
+
+        modalRoot.innerHTML = `
+          <div class="w-full max-w-lg rounded-xl bg-[#131722] border border-slate-800 shadow-2xl overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+              <h2 class="text-base font-semibold text-white">
+                ${isEdit ? `Edit Activation · ${esc(code)}` : 'New Customer Activation'}
+              </h2>
+              <button id="m-close" class="text-slate-400 hover:text-white text-sm px-2 py-1">Close</button>
+            </div>
+            <form id="m-form" class="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Activation Code</label>
+                <div class="flex gap-2">
+                  <input
+                    id="f-code"
+                    type="text"
+                    value="${esc(code)}"
+                    ${isEdit ? 'readonly' : ''}
+                    required
+                    class="flex-1 rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono uppercase text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                  ${
+                    isEdit
+                      ? ''
+                      : '<button type="button" id="f-regen" class="px-3 py-2 rounded-lg border border-slate-700 text-xs font-medium text-slate-300 hover:bg-slate-800 whitespace-nowrap">Regenerate</button>'
+                  }
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Customer Name</label>
+                  <input
+                    id="f-customer"
+                    type="text"
+                    required
+                    value="${esc(existing?.customerName || '')}"
+                    placeholder="e.g. Alex Morgan"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Max Devices</label>
+                  <input
+                    id="f-devices"
+                    type="number"
+                    min="1"
+                    max="10"
+                    required
+                    value="${esc(existing?.maxDevices ?? 1)}"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm tabular-nums text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Xtream Username</label>
+                  <input
+                    id="f-user"
+                    type="text"
+                    required
+                    value="${esc(existing?.username || '')}"
+                    placeholder="Provider username"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Xtream Password</label>
+                  <input
+                    id="f-pass"
+                    type="text"
+                    required
+                    value="${esc(existing?.password || '')}"
+                    placeholder="Provider password"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">
+                  Provider Server URL <span class="text-slate-500">(optional — uses global default if blank)</span>
+                </label>
+                <input
+                  id="f-server"
+                  type="url"
+                  value="${esc(existing?.server || '')}"
+                  placeholder="${esc(state.config.defaultServer || 'https://provider-dns.com:8080')}"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Plan Preset</label>
+                  <select
+                    id="f-plan"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                  >
+                    <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
+                    <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
+                    <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
+                    <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
+                    <option value="12 Months" ${existing?.planLabel === '12 Months' ? 'selected' : ''}>12 Months</option>
+                    <option value="Custom" ${existing?.planLabel === 'Custom' ? 'selected' : ''}>Custom</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Expiration Date</label>
+                  <input
+                    id="f-expiry"
+                    type="date"
+                    value="${esc(defaultExpiry === 'No expiry' ? '' : defaultExpiry)}"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm tabular-nums text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Notes</label>
+                <input
+                  id="f-notes"
+                  type="text"
+                  value="${esc(existing?.notes || '')}"
+                  placeholder="Optional customer note or reference"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div class="pt-2 flex items-center justify-end gap-3 border-t border-slate-800">
+                <button type="button" id="m-cancel" class="px-4 py-2 rounded-lg border border-slate-700 text-sm text-slate-300 hover:bg-slate-800">
+                  Cancel
+                </button>
+                <button type="submit" id="m-save" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-sm font-semibold text-slate-950">
+                  ${isEdit ? 'Save Changes' : 'Create Activation'}
+                </button>
+              </div>
+            </form>
+          </div>
+        `;
+        modalRoot.classList.remove('hidden');
+
+        document.getElementById('m-close').onclick = closeModal;
+        document.getElementById('m-cancel').onclick = closeModal;
+        const regenBtn = document.getElementById('f-regen');
+        if (regenBtn) {
+          regenBtn.onclick = () => {
+            document.getElementById('f-code').value = generateCode();
+          };
+        }
+
+        const planSel = document.getElementById('f-plan');
+        const expInput = document.getElementById('f-expiry');
+        planSel.onchange = () => {
+          const val = planSel.value;
+          const now = new Date();
+          if (val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
+          else if (val === '1 Month') expInput.value = formatDate(addDurationToDate(now, 1));
+          else if (val === '3 Months') expInput.value = formatDate(addDurationToDate(now, 3));
+          else if (val === '6 Months') expInput.value = formatDate(addDurationToDate(now, 6));
+          else if (val === '12 Months') expInput.value = formatDate(addDurationToDate(now, 12));
+        };
+
+        document.getElementById('m-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const saveBtn = document.getElementById('m-save');
+          saveBtn.disabled = true;
+          saveBtn.textContent = 'Saving…';
+
+          const cleanCode = document.getElementById('f-code').value.trim().toUpperCase();
+          const expRaw = document.getElementById('f-expiry').value;
+          const expDate = expRaw ? new Date(`${expRaw}T23:59:59`) : null;
+
+          const payload = {
+            code: cleanCode,
+            customerName: document.getElementById('f-customer').value.trim(),
+            server: document.getElementById('f-server').value.trim(),
+            username: document.getElementById('f-user').value.trim(),
+            password: document.getElementById('f-pass').value.trim(),
+            planLabel: document.getElementById('f-plan').value,
+            status: existing ? existing.status : 'active',
+            expiresAt: expDate ? Timestamp.fromDate(expDate) : null,
+            maxDevices: Math.max(1, Math.min(10, Number(document.getElementById('f-devices').value) || 1)),
+            boundDevices: existing?.boundDevices || [],
+            resellerUid: existing ? existing.resellerUid : state.user.uid,
+            resellerEmail: existing ? existing.resellerEmail : state.user.email || '',
+            notes: document.getElementById('f-notes').value.trim(),
+            updatedAt: serverTimestamp(),
+          };
+
+          try {
+            if (isEdit) {
+              await updateDoc(doc(db, 'activations', cleanCode), payload);
+              await writeLog('update_activation', `Updated activation for ${payload.customerName}`, cleanCode);
+              showToast(`Updated ${cleanCode}`);
+            } else {
+              if (!payload.server && !state.config.defaultServer) {
+                throw new Error('Provide a Server URL or set a global Default Server in Settings.');
+              }
+              await runTransaction(db, async (tx) => {
+                const actRef = doc(db, 'activations', cleanCode);
+                const actSnap = await tx.get(actRef);
+                if (actSnap.exists()) {
+                  throw new Error(`Code ${cleanCode} already exists. Regenerate and try again.`);
+                }
+                if (state.staff.role !== 'admin') {
+                  const resRef = doc(db, 'resellers', state.user.uid);
+                  const resSnap = await tx.get(resRef);
+                  const currentCredits = resSnap.data()?.credits ?? 0;
+                  if (currentCredits < 1) {
+                    throw new Error('Insufficient credits. Ask an admin to top up your balance.');
+                  }
+                  tx.update(resRef, {
+                    credits: currentCredits - 1,
+                    updatedAt: serverTimestamp(),
+                  });
+                }
+                tx.set(actRef, {
+                  ...payload,
+                  createdAt: serverTimestamp(),
+                });
+              });
+              if (state.staff.role !== 'admin') {
+                state.staff.credits = Math.max(0, (state.staff.credits || 0) - 1);
+              }
+              await writeLog('create_activation', `Issued ${payload.planLabel} for ${payload.customerName}`, cleanCode);
+              showToast(`Created activation ${cleanCode}`);
+            }
+            closeModal();
+            await loadData();
+          } catch (err) {
+            showToast(err.message || 'Failed to save activation');
+            saveBtn.disabled = false;
+            saveBtn.textContent = isEdit ? 'Save Changes' : 'Create Activation';
+          }
+        };
+      }
+
+      function openResellerModal(existing = null) {
+        const isEdit = Boolean(existing);
+        modalRoot.innerHTML = `
+          <div class="w-full max-w-md rounded-xl bg-[#131722] border border-slate-800 shadow-2xl overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+              <h2 class="text-base font-semibold text-white">
+                ${isEdit ? 'Edit Reseller' : 'Provision Reseller'}
+              </h2>
+              <button id="r-close" class="text-slate-400 hover:text-white text-sm px-2 py-1">Close</button>
+            </div>
+            <form id="r-form" class="p-6 space-y-4">
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Firebase Auth UID</label>
+                <input
+                  id="r-uid"
+                  type="text"
+                  required
+                  ${isEdit ? 'readonly' : ''}
+                  value="${esc(existing?.uid || '')}"
+                  placeholder="Paste user's UID from Firebase Auth or sign-in screen"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Email</label>
+                <input
+                  id="r-email"
+                  type="email"
+                  required
+                  value="${esc(existing?.email || '')}"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Display Name</label>
+                <input
+                  id="r-name"
+                  type="text"
+                  required
+                  value="${esc(existing?.name || '')}"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+              <div class="grid grid-cols-3 gap-3">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Role</label>
+                  <select id="r-role" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-2.5 py-2 text-sm text-white">
+                    <option value="reseller" ${existing?.role !== 'admin' ? 'selected' : ''}>Reseller</option>
+                    <option value="admin" ${existing?.role === 'admin' ? 'selected' : ''}>Admin</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Credits</label>
+                  <input
+                    id="r-credits"
+                    type="number"
+                    min="0"
+                    required
+                    value="${esc(existing?.credits ?? 25)}"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-2.5 py-2 text-sm tabular-nums text-white"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Status</label>
+                  <select id="r-status" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-2.5 py-2 text-sm text-white">
+                    <option value="active" ${!existing || existing?.status === 'active' ? 'selected' : ''}>Active</option>
+                    <option value="pending" ${existing?.status === 'pending' ? 'selected' : ''}>Pending</option>
+                    <option value="disabled" ${existing?.status === 'disabled' ? 'selected' : ''}>Disabled</option>
+                  </select>
+                </div>
+              </div>
+              <div class="pt-2 flex items-center justify-end gap-3 border-t border-slate-800">
+                <button type="button" id="r-cancel" class="px-4 py-2 rounded-lg border border-slate-700 text-sm text-slate-300 hover:bg-slate-800">Cancel</button>
+                <button type="submit" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-sm font-semibold text-slate-950">Save</button>
+              </div>
+            </form>
+          </div>
+        `;
+        modalRoot.classList.remove('hidden');
+        document.getElementById('r-close').onclick = closeModal;
+        document.getElementById('r-cancel').onclick = closeModal;
+        document.getElementById('r-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const uid = document.getElementById('r-uid').value.trim();
+          const data = {
+            uid,
+            email: document.getElementById('r-email').value.trim(),
+            name: document.getElementById('r-name').value.trim(),
+            role: document.getElementById('r-role').value,
+            credits: Math.max(0, Number(document.getElementById('r-credits').value) || 0),
+            status: document.getElementById('r-status').value,
+            updatedAt: serverTimestamp(),
+          };
+          try {
+            if (isEdit) {
+              await updateDoc(doc(db, 'resellers', uid), data);
+              await writeLog('update_reseller', `Updated reseller ${data.email} (${data.credits} credits)`);
+            } else {
+              await setDoc(doc(db, 'resellers', uid), { ...data, createdAt: serverTimestamp() });
+              await writeLog('update_reseller', `Provisioned reseller ${data.email} (${data.credits} credits)`);
+            }
+            closeModal();
+            showToast('Reseller saved');
+            await loadData();
+          } catch (err) {
+            showToast(err.message || 'Could not save reseller');
+          }
+        };
+      }
+
+      function filteredActivations() {
+        const q = state.search.trim().toLowerCase();
+        return state.activations.filter((item) => {
+          const st = effectiveStatus(item);
+          if (state.statusFilter !== 'all' && st !== state.statusFilter) return false;
+          if (!q) return true;
+          return (
+            (item.code || '').toLowerCase().includes(q) ||
+            (item.customerName || '').toLowerCase().includes(q) ||
+            (item.username || '').toLowerCase().includes(q) ||
+            (item.resellerEmail || '').toLowerCase().includes(q)
+          );
+        });
+      }
+
+      function renderAuthScreen() {
+        const isSignup = state.authMode === 'signup';
+        appEl.innerHTML = `
+          <main class="flex-1 flex items-center justify-center p-6">
+            <div class="w-full max-w-md rounded-xl bg-[#131722] border border-slate-800 p-8">
+              <div class="mb-6">
+                <p class="text-xs font-mono text-[#6C8CFF] mb-1">obtv-1d03d</p>
+                <h1 class="text-2xl font-bold tracking-tight text-white">OrbitTV Reseller Portal</h1>
+                <p class="text-sm text-slate-400 mt-1">
+                  ${isSignup ? 'Request a reseller account. A Super Admin must approve it.' : 'Sign in with your reseller or admin credentials.'}
+                </p>
+              </div>
+              <form id="auth-form" class="space-y-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Email Address</label>
+                  <input id="a-email" type="email" required class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" placeholder="reseller@domain.com" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Password</label>
+                  <input id="a-pass" type="password" required minlength="6" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" placeholder="••••••••" />
+                </div>
+                ${
+                  state.authError
+                    ? `<div class="rounded-lg bg-red-950/60 border border-red-800/70 px-3.5 py-2.5 text-xs text-red-200">${esc(state.authError)}</div>`
+                    : ''
+                }
+                <button type="submit" ${state.authBusy ? 'disabled' : ''} class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] disabled:opacity-50 py-2.5 text-sm font-semibold text-slate-950 transition-colors">
+                  ${state.authBusy ? 'Please wait…' : isSignup ? 'Request Account' : 'Sign In'}
+                </button>
+              </form>
+              <div class="mt-5 pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+                <span>${isSignup ? 'Already have an account?' : 'First-time setup or new reseller?'}</span>
+                <button id="toggle-auth" class="text-[#6C8CFF] hover:underline font-medium">
+                  ${isSignup ? 'Sign In' : 'Create Account'}
+                </button>
+              </div>
+            </div>
+          </main>
+        `;
+
+        document.getElementById('toggle-auth').onclick = () => {
+          state.authMode = isSignup ? 'signin' : 'signup';
+          state.authError = '';
+          render();
+        };
+        document.getElementById('auth-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const email = document.getElementById('a-email').value.trim();
+          const pass = document.getElementById('a-pass').value;
+          state.authBusy = true;
+          state.authError = '';
+          render();
+          try {
+            if (isSignup) {
+              state.pendingSignup = true;
+              await createUserWithEmailAndPassword(auth, email, pass);
+            } else {
+              await signInWithEmailAndPassword(auth, email, pass);
+            }
+          } catch (err) {
+            state.pendingSignup = false;
+            state.authError = err.message || 'Authentication failed.';
+          } finally {
+            state.authBusy = false;
+            render();
+          }
+        };
+      }
+
+      function renderOnboardingOrPending() {
+        const canBootstrap = !state.workspaceBootstrapped;
+        const staffStatus = state.staff?.status;
+        appEl.innerHTML = `
+          <main class="flex-1 flex items-center justify-center p-6">
+            <div class="w-full max-w-lg rounded-xl bg-[#131722] border border-slate-800 p-8 space-y-5">
+              <div>
+                <h1 class="text-xl font-bold text-white">
+                  ${canBootstrap ? 'Initialize OrbitTV Portal' : staffStatus === 'pending' ? 'Approval Pending' : 'Reseller Access Required'}
+                </h1>
+                <p class="text-sm text-slate-400 mt-1">
+                  Signed in as <span class="text-slate-200 font-medium">${esc(state.user.email)}</span>
+                </p>
+              </div>
+
+              ${
+                canBootstrap
+                  ? `
+                <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-4 text-sm text-slate-300 space-y-2">
+                  <p>No workspace configuration exists yet on <span class="font-mono text-[#6C8CFF]">obtv-1d03d</span>.</p>
+                  <p>Initialize the portal now to claim Super Admin access and configure your default Xtream server.</p>
+                </div>
+                <button id="btn-bootstrap" class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] py-2.5 text-sm font-semibold text-slate-950">
+                  Initialize Workspace as Super Admin
+                </button>
+              `
+                  : `
+                <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-4 text-sm text-slate-300 space-y-3">
+                  <p>${
+                    staffStatus === 'pending'
+                      ? 'Your request was sent. A Super Admin needs to approve it before you can issue activations.'
+                      : staffStatus === 'disabled'
+                        ? 'Your reseller account is currently disabled.'
+                        : 'Your account has not been provisioned as a reseller yet.'
+                  }</p>
+                  ${
+                    !state.staff
+                      ? '<button id="btn-request" class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] py-2 text-sm font-semibold text-slate-950">Request Access</button>'
+                      : ''
+                  }
+                  <p class="text-xs text-slate-400">Your Firebase UID (share it with your Admin if they ask):</p>
+                  <div class="flex items-center gap-2">
+                    <code class="flex-1 rounded bg-[#131722] border border-slate-700 px-3 py-2 text-xs font-mono text-slate-200 select-all">${esc(state.user.uid)}</code>
+                    <button id="copy-uid" class="px-3 py-2 rounded border border-slate-700 text-xs text-slate-200 hover:bg-slate-800">Copy UID</button>
+                  </div>
+                </div>
+              `
+              }
+              <div class="pt-2 flex items-center justify-between">
+                <button id="btn-recheck" class="text-xs text-[#6C8CFF] hover:underline">Check approval status</button>
+                <button id="btn-signout" class="text-xs text-slate-400 hover:text-white">Sign Out</button>
+              </div>
+            </div>
+          </main>
+        `;
+
+        document.getElementById('btn-signout').onclick = () => signOut(auth);
+        document.getElementById('btn-recheck').onclick = async () => {
+          try {
+            const snap = await getDoc(doc(db, 'resellers', state.user.uid));
+            state.staff = snap.exists() ? snap.data() : null;
+            render();
+            if (state.staff && state.staff.status === 'active') loadData();
+            else showToast('Still waiting for approval');
+          } catch (err) {
+            showToast(err.message || 'Could not check status');
+          }
+        };
+        const copyBtn = document.getElementById('copy-uid');
+        if (copyBtn) {
+          copyBtn.onclick = () => {
+            navigator.clipboard.writeText(state.user.uid);
+            showToast('UID copied');
+          };
+        }
+        const reqBtn = document.getElementById('btn-request');
+        if (reqBtn) {
+          reqBtn.onclick = async () => {
+            reqBtn.disabled = true;
+            try {
+              await requestAccess();
+              render();
+            } catch (err) {
+              showToast(err.message || 'Request failed');
+              reqBtn.disabled = false;
+            }
+          };
+        }
+        const bootBtn = document.getElementById('btn-bootstrap');
+        if (bootBtn) {
+          bootBtn.onclick = async () => {
+            bootBtn.disabled = true;
+            bootBtn.textContent = 'Initializing…';
+            try {
+              const batch = writeBatch(db);
+              batch.set(doc(db, 'config', 'app'), {
+                appName: 'OrbitTV',
+                defaultServer: '',
+                allowDirectLogin: true,
+                announcement: '',
+                supportContact: '',
+                updatedAt: serverTimestamp(),
+                updatedBy: state.user.uid,
+              });
+              batch.set(doc(db, 'resellers', state.user.uid), {
+                uid: state.user.uid,
+                email: state.user.email || '',
+                name: state.user.email?.split('@')[0] || 'Admin',
+                role: 'admin',
+                credits: 9999,
+                status: 'active',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              await batch.commit();
+              state.workspaceBootstrapped = true;
+              state.staff = {
+                uid: state.user.uid,
+                email: state.user.email || '',
+                name: state.user.email?.split('@')[0] || 'Admin',
+                role: 'admin',
+                credits: 9999,
+                status: 'active',
+              };
+              await writeLog('bootstrap_admin', `Initialized workspace as Super Admin (${state.user.email})`);
+              showToast('Workspace initialized');
+              render();
+              loadData();
+            } catch (err) {
+              showToast(err.message || 'Bootstrap failed. Check Firestore rules.');
+              bootBtn.disabled = false;
+              bootBtn.textContent = 'Initialize Workspace as Super Admin';
+            }
+          };
+        }
+      }
+
+      function renderActivationsTab() {
+        const list = filteredActivations();
+        const total = state.activations.length;
+        const activeCount = state.activations.filter((a) => effectiveStatus(a) === 'active').length;
+        const soonCount = state.activations.filter((a) => effectiveStatus(a) === 'active' && isExpiringSoon(a)).length;
+
+        return `
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Total Activations</div>
+              <div class="text-2xl font-bold tabular-nums text-white mt-1">${total}</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Active Subscriptions</div>
+              <div class="text-2xl font-bold tabular-nums text-emerald-400 mt-1">${activeCount}</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Expiring Within 7 Days</div>
+              <div class="text-2xl font-bold tabular-nums text-amber-400 mt-1">${soonCount}</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">${state.staff.role === 'admin' ? 'Role' : 'Available Credits'}</div>
+              <div class="text-2xl font-bold tabular-nums text-[#6C8CFF] mt-1">
+                ${state.staff.role === 'admin' ? 'Super Admin' : esc(state.staff.credits)}
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <input
+                id="search-input"
+                type="search"
+                value="${esc(state.search)}"
+                placeholder="Search code, customer, username…"
+                class="w-64 rounded-lg bg-[#131722] border border-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-[#6C8CFF]"
+              />
+              <div class="inline-flex rounded-lg bg-[#131722] border border-slate-800 p-1">
+                ${['all', 'active', 'expired', 'suspended']
+                  .map(
+                    (st) => `
+                  <button data-status-filter="${st}" class="px-3 py-1 rounded-md text-xs font-medium capitalize transition-colors ${
+                    state.statusFilter === st
+                      ? 'bg-[#6C8CFF] text-slate-950'
+                      : 'text-slate-400 hover:text-white'
+                  }">${st}</button>
+                `
+                  )
+                  .join('')}
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button id="btn-export-csv" class="px-3 py-2 rounded-lg border border-slate-800 bg-[#131722] text-xs font-medium text-slate-300 hover:bg-slate-800 whitespace-nowrap">
+                Export CSV
+              </button>
+              <button id="btn-new-activation" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-xs font-semibold text-slate-950 whitespace-nowrap">
+                New Activation
+              </button>
+            </div>
+          </div>
+
+          <div class="rounded-xl bg-[#131722] border border-slate-800 overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-slate-800 text-xs text-slate-400">
+                    <th class="py-3 px-4 font-medium">Activation Code</th>
+                    <th class="py-3 px-4 font-medium">Customer</th>
+                    <th class="py-3 px-4 font-medium">Xtream Account</th>
+                    <th class="py-3 px-4 font-medium">Plan &amp; Expiry</th>
+                    <th class="py-3 px-4 font-medium">Devices</th>
+                    <th class="py-3 px-4 font-medium">Status</th>
+                    <th class="py-3 px-4 font-medium text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70 text-sm">
+                  ${
+                    list.length === 0
+                      ? `<tr><td colspan="7" class="py-10 text-center text-sm text-slate-500">${
+                          state.loading ? 'Loading activations…' : 'No matching activations found.'
+                        }</td></tr>`
+                      : list
+                          .map((item) => {
+                            const st = effectiveStatus(item);
+                            const stClass =
+                              st === 'active'
+                                ? 'text-emerald-400'
+                                : st === 'expired'
+                                  ? 'text-amber-400'
+                                  : 'text-red-400';
+                            const stLabel =
+                              st === 'active'
+                                ? 'Active'
+                                : st === 'expired'
+                                  ? 'Expired'
+                                  : 'Suspended';
+                            const bound = Array.isArray(item.boundDevices) ? item.boundDevices.length : 0;
+                            return `
+                            <tr class="hover:bg-slate-800/30">
+                              <td class="py-3 px-4">
+                                <div class="font-mono text-xs font-semibold text-white">${esc(item.code)}</div>
+                                <div class="mt-1 flex items-center gap-2 text-xs text-slate-400">
+                                  <button data-copy-code="${esc(item.code)}" class="hover:text-[#6C8CFF]">Copy Code</button>
+                                  <span>·</span>
+                                  <button data-copy-msg="${esc(item.code)}" class="hover:text-[#6C8CFF]">Copy Invite</button>
+                                </div>
+                              </td>
+                              <td class="py-3 px-4">
+                                <div class="font-medium text-slate-100">${esc(item.customerName)}</div>
+                                <div class="text-xs text-slate-400 truncate max-w-[180px]">${esc(item.notes || item.resellerEmail || '')}</div>
+                              </td>
+                              <td class="py-3 px-4">
+                                <div class="font-mono text-xs text-slate-200">${esc(item.username)}</div>
+                                <div class="text-xs text-slate-500 truncate max-w-[180px]">${esc(item.server || 'Global Default Server')}</div>
+                              </td>
+                              <td class="py-3 px-4">
+                                <div class="text-xs text-slate-200">${esc(item.planLabel || 'Standard')}</div>
+                                <div class="text-xs tabular-nums text-slate-400">${esc(formatDate(item.expiresAt))}</div>
+                              </td>
+                              <td class="py-3 px-4 tabular-nums text-xs text-slate-300">
+                                ${bound} / ${esc(item.maxDevices || 1)}
+                                ${
+                                  bound > 0
+                                    ? `<button data-reset-dev="${esc(item.code)}" class="ml-2 text-[#6C8CFF] hover:underline">Reset</button>`
+                                    : ''
+                                }
+                              </td>
+                              <td class="py-3 px-4 text-xs font-medium ${stClass}">${stLabel}</td>
+                              <td class="py-3 px-4 text-right whitespace-nowrap space-x-2 text-xs">
+                                <button data-extend="${esc(item.code)}" class="text-slate-300 hover:text-white">+1M</button>
+                                <button data-edit="${esc(item.code)}" class="text-[#6C8CFF] hover:underline">Edit</button>
+                                <button data-toggle-status="${esc(item.code)}" class="${
+                                  item.status === 'suspended' ? 'text-emerald-400' : 'text-amber-400'
+                                } hover:underline">${item.status === 'suspended' ? 'Activate' : 'Suspend'}</button>
+                                <button data-delete="${esc(item.code)}" class="text-red-400 hover:underline">Delete</button>
+                              </td>
+                            </tr>
+                          `;
+                          })
+                          .join('')
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderResellersTab() {
+        const pending = state.resellers.filter((r) => r.status === 'pending');
+        return `
+          ${
+            pending.length
+              ? `
+          <div class="rounded-xl bg-amber-950/30 border border-amber-800/60 p-4 mb-5">
+            <h3 class="text-sm font-semibold text-amber-300 mb-3">Pending Requests (${pending.length})</h3>
+            <div class="space-y-2">
+              ${pending
+                .map(
+                  (r) => `
+                <div class="flex items-center justify-between gap-3 rounded-lg bg-[#131722] border border-slate-800 px-3 py-2">
+                  <div class="min-w-0">
+                    <div class="text-sm text-slate-100 truncate">${esc(r.email)}</div>
+                    <div class="text-xs font-mono text-slate-500 truncate">${esc(r.uid)}</div>
+                  </div>
+                  <div class="whitespace-nowrap space-x-3 text-xs">
+                    <button data-approve="${esc(r.uid)}" class="text-emerald-400 hover:underline">Approve</button>
+                    <button data-reject="${esc(r.uid)}" class="text-red-400 hover:underline">Reject</button>
+                  </div>
+                </div>
+              `
+                )
+                .join('')}
+            </div>
+          </div>`
+              : ''
+          }
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h2 class="text-base font-semibold text-white">Resellers &amp; Staff</h2>
+              <p class="text-xs text-slate-400">Approve signup requests, provision resellers by Firebase UID and manage credit balances.</p>
+            </div>
+            <button id="btn-new-reseller" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-xs font-semibold text-slate-950">
+              Add Reseller
+            </button>
+          </div>
+          <div class="rounded-xl bg-[#131722] border border-slate-800 overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-slate-800 text-xs text-slate-400">
+                    <th class="py-3 px-4 font-medium">Name &amp; Email</th>
+                    <th class="py-3 px-4 font-medium">Firebase UID</th>
+                    <th class="py-3 px-4 font-medium">Role</th>
+                    <th class="py-3 px-4 font-medium">Credits</th>
+                    <th class="py-3 px-4 font-medium">Status</th>
+                    <th class="py-3 px-4 font-medium text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70 text-sm">
+                  ${state.resellers
+                    .map(
+                      (r) => `
+                    <tr class="hover:bg-slate-800/30">
+                      <td class="py-3 px-4">
+                        <div class="font-medium text-slate-100">${esc(r.name)}</div>
+                        <div class="text-xs text-slate-400">${esc(r.email)}</div>
+                      </td>
+                      <td class="py-3 px-4 font-mono text-xs text-slate-400">${esc(r.uid)}</td>
+                      <td class="py-3 px-4 text-xs capitalize text-slate-200">${esc(r.role)}</td>
+                      <td class="py-3 px-4 tabular-nums text-xs font-semibold text-[#6C8CFF]">${esc(r.credits)}</td>
+                      <td class="py-3 px-4 text-xs font-medium ${
+                        r.status === 'active'
+                          ? 'text-emerald-400'
+                          : r.status === 'pending'
+                            ? 'text-amber-400'
+                            : 'text-red-400'
+                      }">${esc(r.status)}</td>
+                      <td class="py-3 px-4 text-right whitespace-nowrap space-x-2 text-xs">
+                        <button data-topup="${esc(r.uid)}" class="text-emerald-400 hover:underline">+10 Credits</button>
+                        <button data-edit-reseller="${esc(r.uid)}" class="text-[#6C8CFF] hover:underline">Edit</button>
+                      </td>
+                    </tr>
+                  `
+                    )
+                    .join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderSettingsTab() {
+        const c = state.config;
+        return `
+          <div class="max-w-2xl rounded-xl bg-[#131722] border border-slate-800 p-6">
+            <h2 class="text-base font-semibold text-white">Remote App Configuration</h2>
+            <p class="text-xs text-slate-400 mt-1 mb-5">
+              Changes published here are fetched automatically by the OrbitTV Flutter app on startup.
+            </p>
+            <form id="settings-form" class="space-y-4">
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Global Default Xtream Server URL</label>
+                <input id="cfg-server" type="url" value="${esc(c.defaultServer || '')}" placeholder="https://dns.yourprovider.com:8080" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" />
+                <p class="text-xs text-slate-500 mt-1">Used when an activation leaves its Server URL blank, and pre-fills direct login.</p>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">In-App Announcement Banner</label>
+                <textarea id="cfg-announcement" rows="2" placeholder="Optional notice shown to customers inside OrbitTV…" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]">${esc(c.announcement || '')}</textarea>
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Support Contact Line</label>
+                <input id="cfg-support" type="text" value="${esc(c.supportContact || '')}" placeholder="e.g. Support: @orbittv_help on Telegram" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" />
+              </div>
+              <label class="flex items-center gap-3 pt-1 cursor-pointer">
+                <input id="cfg-direct" type="checkbox" ${c.allowDirectLogin !== false ? 'checked' : ''} class="h-4 w-4 rounded border-slate-700 bg-[#0B0D12] text-[#6C8CFF]" />
+                <span class="text-sm text-slate-200">Allow manual Xtream Server/Username/Password sign-in tab in Flutter app</span>
+              </label>
+              <div class="pt-3 border-t border-slate-800 flex justify-end">
+                <button type="submit" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-sm font-semibold text-slate-950">
+                  Save Remote Config
+                </button>
+              </div>
+            </form>
+          </div>
+        `;
+      }
+
+      function renderLogsTab() {
+        return `
+          <div class="rounded-xl bg-[#131722] border border-slate-800 overflow-hidden">
+            <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <h2 class="text-sm font-semibold text-white">Recent Activity Log</h2>
+              <span class="text-xs text-slate-400 tabular-nums">${state.logs.length} entries</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-slate-800 text-xs text-slate-400">
+                    <th class="py-2.5 px-4 font-medium">Timestamp</th>
+                    <th class="py-2.5 px-4 font-medium">Actor</th>
+                    <th class="py-2.5 px-4 font-medium">Action</th>
+                    <th class="py-2.5 px-4 font-medium">Code</th>
+                    <th class="py-2.5 px-4 font-medium">Details</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70 text-xs">
+                  ${
+                    state.logs.length === 0
+                      ? '<tr><td colspan="5" class="py-8 text-center text-slate-500">No activity recorded yet.</td></tr>'
+                      : state.logs
+                          .map(
+                            (l) => `
+                        <tr class="hover:bg-slate-800/30">
+                          <td class="py-2.5 px-4 font-mono tabular-nums text-slate-400">${esc(formatDateTime(l.createdAt))}</td>
+                          <td class="py-2.5 px-4 text-slate-300">${esc(l.actorEmail)}</td>
+                          <td class="py-2.5 px-4 font-mono text-[#6C8CFF]">${esc(l.action)}</td>
+                          <td class="py-2.5 px-4 font-mono text-slate-200">${esc(l.targetCode || '—')}</td>
+                          <td class="py-2.5 px-4 text-slate-300">${esc(l.details)}</td>
+                        </tr>
+                      `
+                          )
+                          .join('')
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      function renderDashboard() {
+        const isAdmin = state.staff.role === 'admin';
+        const pendingCount = state.resellers.filter((r) => r.status === 'pending').length;
+        const tabs = [
+          { id: 'activations', label: 'Activations' },
+          ...(isAdmin
+            ? [
+                { id: 'resellers', label: pendingCount ? `Resellers (${pendingCount})` : 'Resellers' },
+                { id: 'settings', label: 'App Config' },
+              ]
+            : []),
+          { id: 'logs', label: 'Activity Log' },
+        ];
+
+        let bodyHtml = '';
+        if (state.tab === 'activations') bodyHtml = renderActivationsTab();
+        else if (state.tab === 'resellers' && isAdmin) bodyHtml = renderResellersTab();
+        else if (state.tab === 'settings' && isAdmin) bodyHtml = renderSettingsTab();
+        else bodyHtml = renderLogsTab();
+
+        appEl.innerHTML = `
+          <div class="min-h-screen flex flex-col md:flex-row">
+            <aside class="w-full md:w-64 shrink-0 bg-[#131722] border-b md:border-b-0 md:border-r border-slate-800 p-5 flex flex-col justify-between">
+              <div>
+                <div class="pb-5 border-b border-slate-800">
+                  <div class="text-lg font-bold tracking-tight text-white">OrbitTV</div>
+                  <div class="text-xs text-slate-400 mt-0.5">Reseller Console · obtv-1d03d</div>
+                </div>
+                <nav class="mt-4 space-y-1">
+                  ${tabs
+                    .map(
+                      (t) => `
+                    <button data-tab="${t.id}" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                      state.tab === t.id
+                        ? 'bg-[#6C8CFF]/15 text-[#6C8CFF]'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                    }">${t.label}</button>
+                  `
+                    )
+                    .join('')}
+                </nav>
+              </div>
+              <div class="pt-5 mt-6 border-t border-slate-800 space-y-2">
+                <div class="text-xs text-slate-300 font-medium truncate">${esc(state.staff.name || state.user.email)}</div>
+                <div class="text-xs text-slate-500 truncate">${esc(state.user.email)}</div>
+                <button id="btn-signout" class="text-xs text-slate-400 hover:text-white">Sign Out</button>
+              </div>
+            </aside>
+
+            <div class="flex-1 flex flex-col min-w-0">
+              <header class="h-14 px-6 border-b border-slate-800 flex items-center justify-between bg-[#0B0D12]">
+                <div class="text-sm font-medium text-slate-300">
+                  OrbitTV / <span class="text-white capitalize">${esc(state.tab)}</span>
+                </div>
+                <button id="btn-refresh" class="px-3 py-1.5 rounded-lg border border-slate-800 text-xs text-slate-300 hover:bg-slate-800">
+                  Refresh
+                </button>
+              </header>
+              <main class="flex-1 p-6 max-w-7xl w-full mx-auto">
+                ${bodyHtml}
+              </main>
+            </div>
+          </div>
+        `;
+
+        document.getElementById('btn-signout').onclick = () => signOut(auth);
+        document.getElementById('btn-refresh').onclick = () => loadData();
+        document.querySelectorAll('[data-tab]').forEach((btn) => {
+          btn.onclick = () => {
+            state.tab = btn.dataset.tab;
+            render();
+          };
+        });
+
+        const searchEl = document.getElementById('search-input');
+        if (searchEl) {
+          searchEl.oninput = (e) => {
+            state.search = e.target.value;
+            const pos = e.target.selectionStart;
+            render();
+            const next = document.getElementById('search-input');
+            if (next) {
+              next.focus();
+              next.setSelectionRange(pos, pos);
+            }
+          };
+        }
+
+        document.querySelectorAll('[data-status-filter]').forEach((btn) => {
+          btn.onclick = () => {
+            state.statusFilter = btn.dataset.statusFilter;
+            render();
+          };
+        });
+
+        const newActBtn = document.getElementById('btn-new-activation');
+        if (newActBtn) newActBtn.onclick = () => openActivationModal();
+
+        const exportBtn = document.getElementById('btn-export-csv');
+        if (exportBtn) {
+          exportBtn.onclick = () => {
+            const rows = filteredActivations();
+            const header = ['Code', 'Customer', 'Username', 'Server', 'Plan', 'Expires', 'Status', 'Devices'];
+            const lines = [
+              header.join(','),
+              ...rows.map((r) =>
+                [
+                  r.code,
+                  r.customerName,
+                  r.username,
+                  r.server || state.config.defaultServer,
+                  r.planLabel,
+                  formatDate(r.expiresAt),
+                  effectiveStatus(r),
+                  `${(r.boundDevices || []).length}/${r.maxDevices || 1}`,
+                ]
+                  .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+                  .join(',')
+              ),
+            ];
+            const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `orbittv-activations-${new Date().toISOString().slice(0, 10)}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+          };
+        }
+
+        document.querySelectorAll('[data-copy-code]').forEach((btn) => {
+          btn.onclick = () => {
+            navigator.clipboard.writeText(btn.dataset.copyCode);
+            showToast(`Copied ${btn.dataset.copyCode}`);
+          };
+        });
+
+        document.querySelectorAll('[data-copy-msg]').forEach((btn) => {
+          btn.onclick = () => {
+            const item = state.activations.find((a) => a.code === btn.dataset.copyMsg);
+            if (!item) return;
+            const msg = `OrbitTV Activation\nCustomer: ${item.customerName}\nCode: ${item.code}\nPlan: ${item.planLabel} (Expires ${formatDate(item.expiresAt)})\nDevices: ${item.maxDevices || 1}\n\nOpen OrbitTV and enter your Activation Code to start watching.`;
+            navigator.clipboard.writeText(msg);
+            showToast('Customer invite message copied');
+          };
+        });
+
+        document.querySelectorAll('[data-edit]').forEach((btn) => {
+          btn.onclick = () => {
+            const item = state.activations.find((a) => a.code === btn.dataset.edit);
+            if (item) openActivationModal(item);
+          };
+        });
+
+        document.querySelectorAll('[data-extend]').forEach((btn) => {
+          btn.onclick = async () => {
+            const code = btn.dataset.extend;
+            const item = state.activations.find((a) => a.code === code);
+            if (!item) return;
+            const cur = parseDate(item.expiresAt);
+            const base = cur && cur.getTime() > Date.now() ? cur : new Date();
+            const next = addDurationToDate(base, 1);
+            try {
+              await updateDoc(doc(db, 'activations', code), {
+                expiresAt: Timestamp.fromDate(next),
+                status: 'active',
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog('extend_activation', `Extended by 1 month to ${formatDate(next)}`, code);
+              showToast(`Extended ${code} to ${formatDate(next)}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Extend failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-reset-dev]').forEach((btn) => {
+          btn.onclick = async () => {
+            const code = btn.dataset.resetDev;
+            try {
+              await updateDoc(doc(db, 'activations', code), {
+                boundDevices: [],
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog('reset_devices', 'Cleared all bound devices', code);
+              showToast(`Reset bound devices for ${code}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Reset failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-toggle-status]').forEach((btn) => {
+          btn.onclick = async () => {
+            const code = btn.dataset.toggleStatus;
+            const item = state.activations.find((a) => a.code === code);
+            if (!item) return;
+            const nextStatus = item.status === 'suspended' ? 'active' : 'suspended';
+            try {
+              await updateDoc(doc(db, 'activations', code), {
+                status: nextStatus,
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog(
+                nextStatus === 'suspended' ? 'suspend_activation' : 'reactivate_activation',
+                `Set status to ${nextStatus}`,
+                code
+              );
+              showToast(`${code} is now ${nextStatus}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Status update failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-delete]').forEach((btn) => {
+          btn.onclick = async () => {
+            const code = btn.dataset.delete;
+            try {
+              await deleteDoc(doc(db, 'activations', code));
+              await writeLog('delete_activation', 'Deleted activation record', code);
+              showToast(`Deleted ${code}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Delete failed');
+            }
+          };
+        });
+
+        const newResBtn = document.getElementById('btn-new-reseller');
+        if (newResBtn) newResBtn.onclick = () => openResellerModal();
+
+        document.querySelectorAll('[data-edit-reseller]').forEach((btn) => {
+          btn.onclick = () => {
+            const r = state.resellers.find((x) => x.uid === btn.dataset.editReseller);
+            if (r) openResellerModal(r);
+          };
+        });
+
+        document.querySelectorAll('[data-topup]').forEach((btn) => {
+          btn.onclick = async () => {
+            const uid = btn.dataset.topup;
+            const r = state.resellers.find((x) => x.uid === uid);
+            if (!r) return;
+            const nextCredits = (Number(r.credits) || 0) + 10;
+            try {
+              await updateDoc(doc(db, 'resellers', uid), {
+                credits: nextCredits,
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog('update_reseller', `Added 10 credits to ${r.email} (total ${nextCredits})`);
+              showToast(`Added 10 credits to ${r.name}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Top-up failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-approve]').forEach((btn) => {
+          btn.onclick = async () => {
+            const uid = btn.dataset.approve;
+            const r = state.resellers.find((x) => x.uid === uid);
+            if (!r) return;
+            try {
+              await updateDoc(doc(db, 'resellers', uid), {
+                status: 'active',
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog('update_reseller', `Approved reseller ${r.email}`);
+              showToast(`Approved ${r.email}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Approve failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-reject]').forEach((btn) => {
+          btn.onclick = async () => {
+            const uid = btn.dataset.reject;
+            const r = state.resellers.find((x) => x.uid === uid);
+            if (!r) return;
+            try {
+              await deleteDoc(doc(db, 'resellers', uid));
+              await writeLog('update_reseller', `Rejected request from ${r.email}`);
+              showToast(`Rejected ${r.email}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Reject failed');
+            }
+          };
+        });
+
+        const cfgForm = document.getElementById('settings-form');
+        if (cfgForm) {
+          cfgForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const payload = {
+              appName: 'OrbitTV',
+              defaultServer: document.getElementById('cfg-server').value.trim(),
+              announcement: document.getElementById('cfg-announcement').value.trim(),
+              supportContact: document.getElementById('cfg-support').value.trim(),
+              allowDirectLogin: document.getElementById('cfg-direct').checked,
+              updatedAt: serverTimestamp(),
+              updatedBy: state.user.uid,
+            };
+            try {
+              await setDoc(doc(db, 'config', 'app'), payload, { merge: true });
+              state.config = { ...state.config, ...payload };
+              await writeLog('update_config', 'Updated global remote configuration');
+              showToast('Remote configuration saved');
+            } catch (err) {
+              showToast(err.message || 'Failed to save config');
+            }
+          };
+        }
+      }
+
+      function render() {
+        if (!state.authReady) {
+          appEl.innerHTML = `<div class="flex-1 flex items-center justify-center text-sm text-slate-400">Connecting to OrbitTV Firebase…</div>`;
+          return;
+        }
+        if (!state.user) {
+          renderAuthScreen();
+          return;
+        }
+        if (!state.staff || state.staff.status !== 'active') {
+          renderOnboardingOrPending();
+          return;
+        }
+        renderDashboard();
+      }
+
+      render();
+    </script>
+  </body>
+</html>
