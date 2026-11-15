@@ -148,7 +148,8 @@
     <script type="module">
       import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js';
       import {
-        getAuth,
+        initializeAuth,
+        inMemoryPersistence,
         onAuthStateChanged,
         signInWithEmailAndPassword,
         createUserWithEmailAndPassword,
@@ -184,7 +185,9 @@
       };
 
       const app = initializeApp(firebaseConfig);
-      const auth = getAuth(app);
+      const auth = initializeAuth(app, {
+        persistence: inMemoryPersistence,
+      });
       const db = getFirestore(app);
 
       const state = {
@@ -199,6 +202,7 @@
         loading: false,
         search: '',
         statusFilter: 'all',
+        confirmRemoveUid: null,
         activations: [],
         resellers: [],
         logs: [],
@@ -870,6 +874,9 @@
                   ${isSignup ? 'Sign In' : 'Request Account'}
                 </button>
               </div>
+              <p class="mt-3 text-[11px] text-slate-500">
+                Sessions stay isolated per browser tab so signing in or out here will not affect another open tab.
+              </p>
             </div>
           </main>
         `;
@@ -1259,8 +1266,23 @@
           staffList.length === 0
             ? '<tr><td colspan="6" class="py-8 text-center text-sm text-slate-500">No active or disabled resellers yet.</td></tr>'
             : staffList
-                .map(
-                  (r) => `
+                .map((r) => {
+                  const isSelf = r.uid === state.user.uid;
+                  const isConfirming = state.confirmRemoveUid === r.uid;
+                  const selfOrActionHtml = isSelf
+                    ? '<span class="text-slate-500">Current session</span>'
+                    : isConfirming
+                      ? `
+                        <button type="button" data-remove-confirm="${esc(r.uid)}" class="px-2 py-0.5 rounded bg-red-500/20 text-red-300 hover:bg-red-500/30 font-semibold">Confirm Remove</button>
+                        <button type="button" data-remove-cancel="${esc(r.uid)}" class="text-slate-400 hover:text-white">Cancel</button>
+                      `
+                      : `
+                        <button type="button" data-toggle-reseller="${esc(r.uid)}" class="${
+                          r.status === 'active' ? 'text-amber-400' : 'text-emerald-400'
+                        } hover:underline">${r.status === 'active' ? 'Disable' : 'Enable'}</button>
+                        <button type="button" data-remove-prompt="${esc(r.uid)}" class="text-red-400 hover:underline">Remove</button>
+                      `;
+                  return `
                   <tr class="hover:bg-slate-800/30">
                     <td class="py-3 px-4">
                       <div class="font-medium text-slate-100">${esc(r.name)}</div>
@@ -1273,10 +1295,11 @@
                     <td class="py-3 px-4 text-right whitespace-nowrap space-x-2 text-xs">
                       <button type="button" data-topup="${esc(r.uid)}" class="text-emerald-400 hover:underline">+10 Credits</button>
                       <button type="button" data-edit-reseller="${esc(r.uid)}" class="text-[#6C8CFF] hover:underline">Edit</button>
+                      ${selfOrActionHtml}
                     </td>
                   </tr>
-                `
-                )
+                `;
+                })
                 .join('');
 
         return `
@@ -1691,6 +1714,60 @@
               await loadData();
             } catch (err) {
               showToast(err.message || 'Top-up failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-toggle-reseller]').forEach((btn) => {
+          btn.onclick = async () => {
+            const uid = btn.dataset.toggleReseller;
+            const r = state.resellers.find((x) => x.uid === uid);
+            if (!r || uid === state.user.uid) return;
+            const nextStatus = r.status === 'active' ? 'disabled' : 'active';
+            try {
+              await updateDoc(doc(db, 'resellers', uid), {
+                status: nextStatus,
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog(
+                nextStatus === 'disabled' ? 'disable_reseller' : 'enable_reseller',
+                `${nextStatus === 'disabled' ? 'Disabled' : 'Re-enabled'} access for ${r.email}`
+              );
+              showToast(`${r.email} is now ${nextStatus}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Status update failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-remove-prompt]').forEach((btn) => {
+          btn.onclick = () => {
+            state.confirmRemoveUid = btn.dataset.removePrompt;
+            render();
+          };
+        });
+
+        document.querySelectorAll('[data-remove-cancel]').forEach((btn) => {
+          btn.onclick = () => {
+            state.confirmRemoveUid = null;
+            render();
+          };
+        });
+
+        document.querySelectorAll('[data-remove-confirm]').forEach((btn) => {
+          btn.onclick = async () => {
+            const uid = btn.dataset.removeConfirm;
+            const r = state.resellers.find((x) => x.uid === uid);
+            if (!r || uid === state.user.uid) return;
+            try {
+              await deleteDoc(doc(db, 'resellers', uid));
+              state.confirmRemoveUid = null;
+              await writeLog('remove_reseller', `Removed portal access for ${r.email}`);
+              showToast(`Removed access for ${r.email}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Remove failed');
             }
           };
         });
