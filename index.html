@@ -224,6 +224,7 @@
         confirmRemoveUid: null,
         resellerLoadError: '',
         activations: [],
+        devices: [],
         resellers: [],
         logs: [],
         config: {
@@ -326,6 +327,41 @@
         toastEl.classList.remove('hidden');
         clearTimeout(toastTimer);
         toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 2800);
+      }
+
+      function normalizeMacId(raw) {
+        return String(raw || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      }
+
+      function formatMacAddress(raw) {
+        const clean = normalizeMacId(raw).toUpperCase();
+        if (clean.length !== 12) return String(raw || '').trim().toUpperCase();
+        return clean.match(/.{1,2}/g)?.join(':') || clean;
+      }
+
+      function parsePastedXtreamLink(raw) {
+        const cleaned = String(raw || '').trim().replace(/&amp;/g, '&').replace(/\s+/g, '');
+        if (!cleaned) return null;
+        const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(cleaned) ? cleaned : `http://${cleaned}`;
+        try {
+          const uri = new URL(withScheme);
+          const u = (uri.searchParams.get('username') || '').trim();
+          const p = (uri.searchParams.get('password') || '').trim();
+          if (u && p) return { server: uri.origin, username: u, password: p };
+          const segs = uri.pathname.split('/').filter(Boolean);
+          if (segs.length >= 3) {
+            const kind = segs[0].toLowerCase();
+            if ((kind === 'live' || kind === 'movie' || kind === 'series') && segs.length >= 4) {
+              return { server: uri.origin, username: segs[1], password: segs[2] };
+            }
+            if (segs[0].toLowerCase() !== 'get.php' && segs[0].toLowerCase() !== 'player_api.php') {
+              return { server: uri.origin, username: segs[0], password: segs[1] };
+            }
+          }
+        } catch {
+          return null;
+        }
+        return null;
       }
 
       function generateCode() {
@@ -570,8 +606,21 @@
                 collection(db, 'activations'),
                 where('resellerUid', '==', state.user.uid)
               );
-          const actSnap = await getDocs(actQ);
+          const devQ = isAdmin
+            ? query(collection(db, 'devices'))
+            : query(
+                collection(db, 'devices'),
+                where('resellerUid', '==', state.user.uid)
+              );
+          const [actSnap, devSnap] = await Promise.all([getDocs(actQ), getDocs(devQ)]);
           state.activations = actSnap.docs
+            .map((d) => ({ id: d.id, ...d.data() }))
+            .sort((a, b) => {
+              const ta = parseDate(a.createdAt)?.getTime() || 0;
+              const tb = parseDate(b.createdAt)?.getTime() || 0;
+              return tb - ta;
+            });
+          state.devices = devSnap.docs
             .map((d) => ({ id: d.id, ...d.data() }))
             .sort((a, b) => {
               const ta = parseDate(a.createdAt)?.getTime() || 0;
@@ -1007,6 +1056,365 @@
         };
       }
 
+      function openDeviceModal(existing = null) {
+        const isEdit = Boolean(existing);
+        const initSource = existing?.expirySource === 'manual' ? 'manual' : 'auto';
+        const defaultExpiry = existing
+          ? formatDate(existing.expiresAt)
+          : formatDate(addDurationToDate(new Date(), 1));
+
+        modalRoot.innerHTML = `
+          <div class="w-full max-w-lg rounded-xl bg-[#131722] border border-slate-800 shadow-2xl overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+              <h2 class="text-base font-semibold text-white">
+                ${isEdit ? `Edit Device Playlist · ${esc(existing.macAddress)}` : 'Assign Playlist to Device MAC'}
+              </h2>
+              <button id="dm-close" type="button" class="text-slate-400 hover:text-white text-sm px-2 py-1">Close</button>
+            </div>
+            <form id="dm-form" class="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Device MAC Address</label>
+                  <input
+                    id="d-mac"
+                    type="text"
+                    required
+                    ${isEdit ? 'readonly' : ''}
+                    value="${esc(existing?.macAddress || '')}"
+                    placeholder="A4:C1:38:92:EF:01"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono uppercase text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Device Key</label>
+                  <input
+                    id="d-key"
+                    type="text"
+                    required
+                    minlength="4"
+                    maxlength="20"
+                    value="${esc(existing?.deviceKey || '')}"
+                    placeholder="e.g. 482915"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Customer Name</label>
+                <input
+                  id="d-customer"
+                  type="text"
+                  required
+                  value="${esc(existing?.customerName || '')}"
+                  placeholder="e.g. Living Room TV / John"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">
+                  Quick Paste M3U / Xtream Link <span class="text-slate-500">(optional — auto-fills below)</span>
+                </label>
+                <input
+                  id="d-paste"
+                  type="text"
+                  placeholder="http://dns.com:8080/get.php?username=...&password=..."
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Xtream Username</label>
+                  <input
+                    id="d-user"
+                    type="text"
+                    required
+                    value="${esc(existing?.username || '')}"
+                    placeholder="Provider username"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Xtream Password</label>
+                  <input
+                    id="d-pass"
+                    type="text"
+                    required
+                    value="${esc(existing?.password || '')}"
+                    placeholder="Provider password"
+                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-[#6C8CFF]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">
+                  Provider Server URL <span class="text-slate-500">(optional — uses global default if blank)</span>
+                </label>
+                <input
+                  id="d-server"
+                  type="url"
+                  value="${esc(existing?.server || '')}"
+                  placeholder="${esc(state.config.defaultServer || 'https://provider-dns.com:8080')}"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-3.5 space-y-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <div class="text-xs font-medium text-slate-200">Subscription &amp; Expiry Tracking</div>
+                    <div id="d-source-hint" class="text-[11px] text-slate-400 mt-0.5">
+                      ${
+                        initSource === 'auto'
+                          ? 'Duration (Trial / 1M / 12M) &amp; expiry auto-sync from your IPTV panel.'
+                          : 'Enforce a manual expiry date in OrbitTV.'
+                      }
+                    </div>
+                  </div>
+                  <select
+                    id="d-expiry-source"
+                    class="rounded-lg bg-[#131722] border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#6C8CFF]"
+                  >
+                    <option value="auto" ${initSource === 'auto' ? 'selected' : ''}>Auto (IPTV Panel)</option>
+                    <option value="manual" ${initSource === 'manual' ? 'selected' : ''}>Manual Override</option>
+                  </select>
+                </div>
+
+                <div id="d-manual-box" class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 ${
+                  initSource === 'manual' ? '' : 'hidden'
+                }">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Plan Preset</label>
+                    <select
+                      id="d-plan"
+                      class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                    >
+                      <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
+                      <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
+                      <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
+                      <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
+                      <option value="12 Months" ${existing?.planLabel === '12 Months' ? 'selected' : ''}>12 Months</option>
+                      <option value="Custom" ${existing?.planLabel === 'Custom' ? 'selected' : ''}>Custom</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Expiration Date</label>
+                    <input
+                      id="d-expiry"
+                      type="date"
+                      value="${esc(defaultExpiry === 'No expiry' ? '' : defaultExpiry)}"
+                      class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm tabular-nums text-white focus:outline-none focus:border-[#6C8CFF]"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-xs font-medium text-slate-400 mb-1.5">Notes</label>
+                <input
+                  id="d-notes"
+                  type="text"
+                  value="${esc(existing?.notes || '')}"
+                  placeholder="Optional customer note or reference"
+                  class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                />
+              </div>
+
+              <div class="pt-2 flex items-center justify-end gap-3 border-t border-slate-800">
+                <button type="button" id="dm-cancel" class="px-4 py-2 rounded-lg border border-slate-700 text-sm text-slate-300 hover:bg-slate-800">
+                  Cancel
+                </button>
+                <button type="submit" id="dm-save" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-sm font-semibold text-slate-950">
+                  ${isEdit ? 'Save Changes' : 'Assign Playlist'}
+                </button>
+              </div>
+            </form>
+          </div>
+        `;
+        modalRoot.classList.remove('hidden');
+
+        document.getElementById('dm-close').onclick = closeModal;
+        document.getElementById('dm-cancel').onclick = closeModal;
+
+        const macInput = document.getElementById('d-mac');
+        macInput.onblur = () => {
+          macInput.value = formatMacAddress(macInput.value);
+        };
+
+        const pasteInput = document.getElementById('d-paste');
+        pasteInput.oninput = () => {
+          const parsed = parsePastedXtreamLink(pasteInput.value);
+          if (parsed) {
+            document.getElementById('d-server').value = parsed.server;
+            document.getElementById('d-user').value = parsed.username;
+            document.getElementById('d-pass').value = parsed.password;
+            showToast('Extracted Server, Username & Password');
+          }
+        };
+
+        const sourceSel = document.getElementById('d-expiry-source');
+        const manualBox = document.getElementById('d-manual-box');
+        const sourceHint = document.getElementById('d-source-hint');
+        const planSel = document.getElementById('d-plan');
+        const expInput = document.getElementById('d-expiry');
+
+        sourceSel.onchange = () => {
+          const isManual = sourceSel.value === 'manual';
+          manualBox.classList.toggle('hidden', !isManual);
+          sourceHint.textContent = isManual
+            ? 'Enforce a manual expiry date in OrbitTV.'
+            : 'Duration (Trial / 1M / 12M) & expiry auto-sync from your IPTV panel.';
+          if (isManual && !expInput.value) {
+            expInput.value = formatDate(addDurationToDate(new Date(), 1));
+          }
+        };
+
+        planSel.onchange = () => {
+          const val = planSel.value;
+          const now = new Date();
+          if (val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
+          else if (val === '1 Month') expInput.value = formatDate(addDurationToDate(now, 1));
+          else if (val === '3 Months') expInput.value = formatDate(addDurationToDate(now, 3));
+          else if (val === '6 Months') expInput.value = formatDate(addDurationToDate(now, 6));
+          else if (val === '12 Months') expInput.value = formatDate(addDurationToDate(now, 12));
+        };
+
+        document.getElementById('dm-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const cleanMacId = normalizeMacId(macInput.value);
+          if (!/^[a-f0-9]{12}$/.test(cleanMacId)) {
+            showToast('Enter a valid 12-character MAC address (e.g. A4:C1:38:92:EF:01).');
+            return;
+          }
+          const cleanMacAddress = formatMacAddress(cleanMacId);
+          const cleanKey = document.getElementById('d-key').value.trim();
+          if (cleanKey.length < 4 || cleanKey.length > 20) {
+            showToast('Device Key must be 4–20 characters.');
+            return;
+          }
+
+          const saveBtn = document.getElementById('dm-save');
+          saveBtn.disabled = true;
+          saveBtn.textContent = 'Saving…';
+
+          const expirySource = sourceSel.value === 'manual' ? 'manual' : 'auto';
+          const isManual = expirySource === 'manual';
+          const expRaw = expInput.value;
+          const expDate = isManual && expRaw ? new Date(`${expRaw}T23:59:59`) : null;
+          const srvVal = document.getElementById('d-server').value.trim();
+          const userVal = document.getElementById('d-user').value.trim();
+          const passVal = document.getElementById('d-pass').value.trim();
+          const customerVal = document.getElementById('d-customer').value.trim() || cleanMacAddress;
+
+          let resolvedPlan = isManual
+            ? planSel.value
+            : existing?.planLabel && existing.planLabel !== 'Pending Sync'
+              ? existing.planLabel
+              : 'Pending Sync';
+          let resolvedExpiry = expDate
+            ? Timestamp.fromDate(expDate)
+            : !isManual && existing?.expiresAt
+              ? parseDate(existing.expiresAt)
+                ? Timestamp.fromDate(parseDate(existing.expiresAt))
+                : null
+              : null;
+          let extraPanelFields = {};
+
+          if (!isManual) {
+            const effectiveSrv = srvVal || state.config.defaultServer || '';
+            if (effectiveSrv && userVal && passVal) {
+              const probe = await probeXtreamPanel(
+                effectiveSrv,
+                userVal,
+                passVal,
+                state.config.m3uProxyUrl
+              );
+              if (probe.ok) {
+                resolvedPlan = probe.planLabel;
+                resolvedExpiry = probe.expiresAt ? Timestamp.fromDate(probe.expiresAt) : null;
+                extraPanelFields = {
+                  panelStatus: probe.panelStatus,
+                  isTrial: probe.isTrial,
+                  panelSyncedAt: serverTimestamp(),
+                };
+              }
+            }
+          }
+
+          const payload = {
+            macId: cleanMacId,
+            macAddress: cleanMacAddress,
+            deviceKey: cleanKey,
+            customerName: customerVal,
+            server: srvVal,
+            username: userVal,
+            password: passVal,
+            planLabel: resolvedPlan,
+            status: existing ? existing.status : 'active',
+            expiresAt: resolvedExpiry,
+            expirySource,
+            ...extraPanelFields,
+            resellerUid: existing ? existing.resellerUid : state.user.uid,
+            resellerEmail: existing ? existing.resellerEmail : state.user.email || '',
+            notes: document.getElementById('d-notes').value.trim(),
+            updatedAt: serverTimestamp(),
+          };
+
+          try {
+            if (isEdit) {
+              await updateDoc(doc(db, 'devices', cleanMacId), payload);
+              await writeLog('edit_device', `Updated playlist for ${cleanMacAddress}`, cleanMacAddress);
+              showToast(`Updated ${cleanMacAddress}`);
+            } else {
+              if (!payload.server && !state.config.defaultServer) {
+                throw new Error('Provide a Server URL or set a global Default Server in App Config.');
+              }
+              await runTransaction(db, async (tx) => {
+                const devRef = doc(db, 'devices', cleanMacId);
+                const devSnap = await tx.get(devRef);
+                if (devSnap.exists()) {
+                  throw new Error(`Device ${cleanMacAddress} already has a playlist. Edit it from the list instead.`);
+                }
+                if (state.staff.role !== 'admin') {
+                  const resRef = doc(db, 'resellers', state.user.uid);
+                  const resSnap = await tx.get(resRef);
+                  const currentCredits = resSnap.data()?.credits ?? 0;
+                  if (currentCredits < 1) {
+                    throw new Error('Insufficient credits. Ask an admin to top up your balance.');
+                  }
+                  tx.update(resRef, {
+                    credits: currentCredits - 1,
+                    updatedAt: serverTimestamp(),
+                  });
+                }
+                tx.set(devRef, {
+                  ...payload,
+                  createdAt: serverTimestamp(),
+                });
+              });
+              if (state.staff.role !== 'admin') {
+                state.staff.credits = Math.max(0, (state.staff.credits || 0) - 1);
+              }
+              await writeLog('assign_device', `Assigned ${payload.planLabel} to ${cleanMacAddress}`, cleanMacAddress);
+              showToast(
+                resolvedPlan === 'Pending Sync'
+                  ? `Assigned ${cleanMacAddress} — duration syncs automatically on app connect`
+                  : `Assigned ${cleanMacAddress} (${resolvedPlan})`
+              );
+            }
+            closeModal();
+            await loadData();
+          } catch (err) {
+            showToast(err.message || 'Failed to save device playlist');
+            saveBtn.disabled = false;
+            saveBtn.textContent = isEdit ? 'Save Changes' : 'Assign Playlist';
+          }
+        };
+      }
+
       function openResellerModal(existing = null) {
         const isEdit = Boolean(existing);
         modalRoot.innerHTML = `
@@ -1125,6 +1533,24 @@
           if (!q) return true;
           return (
             (item.code || '').toLowerCase().includes(q) ||
+            (item.customerName || '').toLowerCase().includes(q) ||
+            (item.username || '').toLowerCase().includes(q) ||
+            (item.resellerEmail || '').toLowerCase().includes(q)
+          );
+        });
+      }
+
+      function filteredDevices() {
+        const q = state.search.trim().toLowerCase();
+        const qNorm = normalizeMacId(q);
+        return state.devices.filter((item) => {
+          const st = effectiveStatus(item);
+          if (state.statusFilter !== 'all' && st !== state.statusFilter) return false;
+          if (!q) return true;
+          return (
+            (item.macAddress || '').toLowerCase().includes(q) ||
+            (qNorm.length >= 2 && (item.macId || '').includes(qNorm)) ||
+            (item.deviceKey || '').toLowerCase().includes(q) ||
             (item.customerName || '').toLowerCase().includes(q) ||
             (item.username || '').toLowerCase().includes(q) ||
             (item.resellerEmail || '').toLowerCase().includes(q)
@@ -1617,6 +2043,170 @@
         `;
       }
 
+      function renderDevicesTab() {
+        const list = filteredDevices();
+        const total = state.devices.length;
+        const activeCount = state.devices.filter((d) => effectiveStatus(d) === 'active').length;
+        const expiredCount = state.devices.filter((d) => effectiveStatus(d) === 'expired').length;
+        const soonCount = state.devices.filter((d) => effectiveStatus(d) === 'active' && isExpiringSoon(d)).length;
+
+        const rowsHtml =
+          list.length === 0
+            ? `<tr><td colspan="7" class="py-10 text-center text-sm text-slate-500">${
+                state.loading ? 'Loading devices…' : 'No assigned devices found yet.'
+              }</td></tr>`
+            : list
+                .map((item) => {
+                  const st = effectiveStatus(item);
+                  const stClass =
+                    st === 'active'
+                      ? 'text-emerald-400'
+                      : st === 'expired'
+                        ? 'text-amber-400'
+                        : 'text-red-400';
+                  const stLabel =
+                    st === 'active'
+                      ? 'Active'
+                      : st === 'expired'
+                        ? 'Expired'
+                        : item.status === 'suspended'
+                          ? 'Suspended'
+                          : 'Panel Disabled';
+                  const planTitle =
+                    item.planLabel === 'Pending Sync'
+                      ? 'Auto (IPTV Panel)'
+                      : item.planLabel || 'Standard';
+                  const showTrialBadge =
+                    item.isTrial && !planTitle.toLowerCase().includes('trial');
+                  const expiryLine = item.expiresAt
+                    ? `${formatDate(item.expiresAt)} · ${formatRemaining(item)}`
+                    : formatRemaining(item);
+                  return `
+                    <tr class="hover:bg-slate-800/30">
+                      <td class="py-3 px-4">
+                        <div class="font-mono text-xs font-semibold text-white">${esc(item.macAddress)}</div>
+                        <div class="mt-1 flex items-center gap-2 text-xs text-slate-400">
+                          <span class="font-mono text-cyan-300">Key: ${esc(item.deviceKey)}</span>
+                          <span>·</span>
+                          <button type="button" data-dev-copy="${esc(item.macId)}" class="hover:text-[#6C8CFF]">Copy</button>
+                        </div>
+                      </td>
+                      <td class="py-3 px-4">
+                        <div class="font-medium text-slate-100">${esc(item.customerName)}</div>
+                        <div class="text-xs text-slate-400 truncate max-w-[180px]">${esc(item.notes || item.resellerEmail || '')}</div>
+                      </td>
+                      <td class="py-3 px-4">
+                        <div class="font-mono text-xs text-slate-200">${esc(item.username)}</div>
+                        <div class="text-xs text-slate-500 truncate max-w-[180px]">${esc(item.server || 'Global Default Server')}</div>
+                      </td>
+                      <td class="py-3 px-4">
+                        <div class="text-xs text-slate-200 flex items-center gap-1.5">
+                          <span>${esc(planTitle)}</span>
+                          ${
+                            showTrialBadge
+                              ? '<span class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 text-[10px] font-medium">Trial</span>'
+                              : ''
+                          }
+                        </div>
+                        <div class="text-xs tabular-nums text-slate-400">${esc(expiryLine)}</div>
+                      </td>
+                      <td class="py-3 px-4 tabular-nums text-xs text-slate-400">${esc(formatDateTime(item.lastSeenAt))}</td>
+                      <td class="py-3 px-4 text-xs font-medium ${stClass}">${stLabel}</td>
+                      <td class="py-3 px-4 text-right whitespace-nowrap space-x-2 text-xs">
+                        ${
+                          item.expirySource === 'manual'
+                            ? `<button type="button" data-dev-extend="${esc(item.macId)}" class="text-slate-300 hover:text-white">+1M</button>`
+                            : `<button type="button" data-dev-sync="${esc(item.macId)}" class="text-slate-300 hover:text-white" title="Check IPTV panel subscription now">Sync</button>`
+                        }
+                        <button type="button" data-dev-edit="${esc(item.macId)}" class="text-[#6C8CFF] hover:underline">Edit</button>
+                        <button type="button" data-dev-toggle="${esc(item.macId)}" class="${
+                          item.status === 'suspended' ? 'text-emerald-400' : 'text-amber-400'
+                        } hover:underline">${item.status === 'suspended' ? 'Activate' : 'Suspend'}</button>
+                        <button type="button" data-dev-delete="${esc(item.macId)}" class="text-red-400 hover:underline">Delete</button>
+                      </td>
+                    </tr>
+                  `;
+                })
+                .join('');
+
+        return `
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Assigned Devices</div>
+              <div class="text-2xl font-bold tabular-nums text-white mt-1">${total}</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Active Devices</div>
+              <div class="text-2xl font-bold tabular-nums text-emerald-400 mt-1">${activeCount}</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">Expired Devices</div>
+              <div class="text-2xl font-bold tabular-nums text-amber-400 mt-1">${expiredCount}</div>
+              <div class="text-[11px] text-slate-500 mt-0.5 tabular-nums">${soonCount} expiring within 7d</div>
+            </div>
+            <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
+              <div class="text-xs text-slate-400">${state.staff.role === 'admin' ? 'Role' : 'Available Credits'}</div>
+              <div class="text-2xl font-bold tabular-nums text-[#6C8CFF] mt-1">
+                ${state.staff.role === 'admin' ? 'Super Admin' : esc(state.staff.credits)}
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <input
+                id="search-input"
+                type="search"
+                value="${esc(state.search)}"
+                placeholder="Search MAC, key, customer, user…"
+                class="w-64 rounded-lg bg-[#131722] border border-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-[#6C8CFF]"
+              />
+              <div class="inline-flex rounded-lg bg-[#131722] border border-slate-800 p-1">
+                ${['all', 'active', 'expired', 'suspended']
+                  .map((st) => {
+                    const c =
+                      st === 'all'
+                        ? total
+                        : state.devices.filter((d) => effectiveStatus(d) === st).length;
+                    return `
+                  <button type="button" data-status-filter="${st}" class="px-3 py-1 rounded-md text-xs font-medium capitalize transition-colors ${
+                    state.statusFilter === st
+                      ? 'bg-[#6C8CFF] text-slate-950'
+                      : 'text-slate-400 hover:text-white'
+                  }">${st} (${c})</button>
+                `;
+                  })
+                  .join('')}
+              </div>
+            </div>
+            <button id="btn-new-device" type="button" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-xs font-semibold text-slate-950 whitespace-nowrap">
+              Assign Device Playlist
+            </button>
+          </div>
+
+          <div class="rounded-xl bg-[#131722] border border-slate-800 overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-slate-800 text-xs text-slate-400">
+                    <th class="py-3 px-4 font-medium">MAC Address &amp; Key</th>
+                    <th class="py-3 px-4 font-medium">Customer</th>
+                    <th class="py-3 px-4 font-medium">Xtream Account</th>
+                    <th class="py-3 px-4 font-medium">Plan &amp; Expiry</th>
+                    <th class="py-3 px-4 font-medium">Last Seen</th>
+                    <th class="py-3 px-4 font-medium">Status</th>
+                    <th class="py-3 px-4 font-medium text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70 text-sm">
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
       function renderResellersTab() {
         const pendingList = state.resellers.filter((r) => r.status === 'pending');
         const staffList = state.resellers.filter((r) => r.status !== 'pending');
@@ -1849,6 +2439,7 @@
         const pendingCount = isAdmin ? state.resellers.filter((r) => r.status === 'pending').length : 0;
         const tabs = [
           { id: 'activations', label: 'Activations' },
+          { id: 'devices', label: 'Device MACs' },
           ...(isAdmin
             ? [
                 {
@@ -1863,6 +2454,7 @@
 
         let bodyHtml = '';
         if (state.tab === 'activations') bodyHtml = renderActivationsTab();
+        else if (state.tab === 'devices') bodyHtml = renderDevicesTab();
         else if (state.tab === 'resellers' && isAdmin) bodyHtml = renderResellersTab();
         else if (state.tab === 'settings' && isAdmin) bodyHtml = renderSettingsTab();
         else bodyHtml = renderLogsTab();
@@ -2110,6 +2702,116 @@
               await deleteDoc(doc(db, 'activations', code));
               await writeLog('delete_activation', 'Deleted activation record', code);
               showToast(`Deleted ${code}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Delete failed');
+            }
+          };
+        });
+
+        const newDevBtn = document.getElementById('btn-new-device');
+        if (newDevBtn) newDevBtn.onclick = () => openDeviceModal();
+
+        document.querySelectorAll('[data-dev-copy]').forEach((btn) => {
+          btn.onclick = () => {
+            const item = state.devices.find((d) => d.macId === btn.dataset.devCopy);
+            if (!item) return;
+            navigator.clipboard.writeText(`OrbitTV Device\nMAC: ${item.macAddress}\nKey: ${item.deviceKey}`);
+            showToast(`Copied ${item.macAddress}`);
+          };
+        });
+
+        document.querySelectorAll('[data-dev-edit]').forEach((btn) => {
+          btn.onclick = () => {
+            const item = state.devices.find((d) => d.macId === btn.dataset.devEdit);
+            if (item) openDeviceModal(item);
+          };
+        });
+
+        document.querySelectorAll('[data-dev-sync]').forEach((btn) => {
+          btn.onclick = async () => {
+            const macId = btn.dataset.devSync;
+            const item = state.devices.find((d) => d.macId === macId);
+            if (!item) return;
+            const srv = item.server || state.config.defaultServer || '';
+            const probe = await probeXtreamPanel(srv, item.username, item.password, state.config.m3uProxyUrl);
+            if (!probe.ok) {
+              showToast('Browser blocked direct HTTP/CORS check — app auto-syncs this when device connects');
+              return;
+            }
+            try {
+              await updateDoc(doc(db, 'devices', macId), {
+                planLabel: probe.planLabel,
+                expiresAt: probe.expiresAt ? Timestamp.fromDate(probe.expiresAt) : null,
+                expirySource: 'auto',
+                panelStatus: probe.panelStatus,
+                isTrial: probe.isTrial,
+                panelSyncedAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              showToast(`Synced ${item.macAddress}: ${probe.planLabel} (${probe.panelStatus})`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Sync failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-dev-extend]').forEach((btn) => {
+          btn.onclick = async () => {
+            const macId = btn.dataset.devExtend;
+            const item = state.devices.find((d) => d.macId === macId);
+            if (!item) return;
+            const cur = parseDate(item.expiresAt);
+            const base = cur && cur.getTime() > Date.now() ? cur : new Date();
+            const next = addDurationToDate(base, 1);
+            try {
+              await updateDoc(doc(db, 'devices', macId), {
+                expiresAt: Timestamp.fromDate(next),
+                status: 'active',
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog('extend_device', `Extended ${item.macAddress} by 1 month to ${formatDate(next)}`, item.macAddress);
+              showToast(`Extended ${item.macAddress} to ${formatDate(next)}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Extend failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-dev-toggle]').forEach((btn) => {
+          btn.onclick = async () => {
+            const macId = btn.dataset.devToggle;
+            const item = state.devices.find((d) => d.macId === macId);
+            if (!item) return;
+            const nextStatus = item.status === 'suspended' ? 'active' : 'suspended';
+            try {
+              await updateDoc(doc(db, 'devices', macId), {
+                status: nextStatus,
+                updatedAt: serverTimestamp(),
+              });
+              await writeLog(
+                nextStatus === 'suspended' ? 'suspend_device' : 'activate_device',
+                `Set ${item.macAddress} to ${nextStatus}`,
+                item.macAddress
+              );
+              showToast(`${item.macAddress} is now ${nextStatus}`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Status update failed');
+            }
+          };
+        });
+
+        document.querySelectorAll('[data-dev-delete]').forEach((btn) => {
+          btn.onclick = async () => {
+            const macId = btn.dataset.devDelete;
+            const item = state.devices.find((d) => d.macId === macId);
+            try {
+              await deleteDoc(doc(db, 'devices', macId));
+              await writeLog('delete_device', `Removed device playlist for ${item?.macAddress || macId}`, item?.macAddress || macId);
+              showToast(`Removed ${item?.macAddress || macId}`);
               await loadData();
             } catch (err) {
               showToast(err.message || 'Delete failed');
