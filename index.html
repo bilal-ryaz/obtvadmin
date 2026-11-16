@@ -117,24 +117,39 @@
           /Failed to connect to MetaMask/i.test(text)
         );
       };
-      window.addEventListener('error', function (ev) {
-        if (!window.__orbitBooted && ev && ev.message) {
-          var stack = (ev.error && ev.error.stack) || ev.filename || '';
-          if (window.__orbitIsExtensionError(ev.message, stack)) return;
-          window.__orbitShowBootError('Portal Startup Error', ev.message);
-        }
-      });
-      window.addEventListener('unhandledrejection', function (ev) {
-        if (!window.__orbitBooted && ev && ev.reason) {
-          var msg = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason);
-          var stack = ev.reason && ev.reason.stack ? ev.reason.stack : '';
-          if (window.__orbitIsExtensionError(msg, stack)) {
+      window.addEventListener(
+        'error',
+        function (ev) {
+          var stack = (ev && ev.error && ev.error.stack) || (ev && ev.filename) || '';
+          if (ev && window.__orbitIsExtensionError(ev.message, stack)) {
             ev.preventDefault();
+            ev.stopImmediatePropagation();
             return;
           }
-          window.__orbitShowBootError('Portal Async Startup Error', msg);
-        }
-      });
+          if (!window.__orbitBooted && ev && ev.message) {
+            window.__orbitShowBootError('Portal Startup Error', ev.message);
+          }
+        },
+        true
+      );
+      window.addEventListener(
+        'unhandledrejection',
+        function (ev) {
+          if (ev && ev.reason) {
+            var msg = ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason);
+            var stack = ev.reason && ev.reason.stack ? ev.reason.stack : '';
+            if (window.__orbitIsExtensionError(msg, stack)) {
+              ev.preventDefault();
+              ev.stopImmediatePropagation();
+              return;
+            }
+            if (!window.__orbitBooted) {
+              window.__orbitShowBootError('Portal Async Startup Error', msg);
+            }
+          }
+        },
+        true
+      );
       window.__orbitWatchdog = setTimeout(function () {
         if (!window.__orbitBooted) {
           window.__orbitShowBootError(
@@ -212,6 +227,11 @@
           allowDirectLogin: true,
           announcement: '',
           supportContact: '',
+          latestVersion: '',
+          updateUrl: '',
+          updateNotes: '',
+          customUserAgent: '',
+          m3uProxyUrl: '',
         },
       };
 
@@ -1359,8 +1379,38 @@
               </div>
               <label class="flex items-center gap-3 pt-1 cursor-pointer">
                 <input id="cfg-direct" type="checkbox" ${c.allowDirectLogin !== false ? 'checked' : ''} class="h-4 w-4 rounded border-slate-700 bg-[#0B0D12] text-[#6C8CFF]" />
-                <span class="text-sm text-slate-200">Allow manual Xtream Server/Username/Password sign-in tab in Flutter app</span>
+                <span class="text-sm text-slate-200">Allow manual Xtream &amp; M3U sign-in tabs in Flutter app</span>
               </label>
+              <div class="pt-4 mt-2 border-t border-slate-800 space-y-4">
+                <div>
+                  <h3 class="text-sm font-semibold text-white">App Updates &amp; Live Network Overrides</h3>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Update User-Agent headers or M3U relay URLs live without rebuilding the APK, and notify users when a new APK release is available.
+                  </p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Latest APK Version</label>
+                    <input id="cfg-version" type="text" value="${esc(c.latestVersion || '')}" placeholder="e.g. 1.0.2" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-[#6C8CFF]" />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Custom HTTP User-Agent (Live)</label>
+                    <input id="cfg-ua" type="text" value="${esc(c.customUserAgent || '')}" placeholder="e.g. VLC/3.0.20 LibVLC/3.0.20" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-[#6C8CFF]" />
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">APK Update Download URL</label>
+                  <input id="cfg-update-url" type="url" value="${esc(c.updateUrl || '')}" placeholder="https://github.com/your-user/your-repo/releases/latest" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Update Notes</label>
+                  <input id="cfg-update-notes" type="text" value="${esc(c.updateNotes || '')}" placeholder="e.g. Fixes M3U login and improves playback stability" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]" />
+                </div>
+                <div>
+                  <label class="block text-xs font-medium text-slate-400 mb-1.5">M3U / Xtream Relay Prefix (Optional)</label>
+                  <input id="cfg-proxy" type="url" value="${esc(c.m3uProxyUrl || '')}" placeholder="https://your-worker.workers.dev/?url=" class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-[#6C8CFF]" />
+                </div>
+              </div>
               <div class="pt-3 border-t border-slate-800 flex justify-end">
                 <button type="submit" class="px-4 py-2 rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] text-sm font-semibold text-slate-950">
                   Save Remote Config
@@ -1782,6 +1832,11 @@
               announcement: document.getElementById('cfg-announcement').value.trim(),
               supportContact: document.getElementById('cfg-support').value.trim(),
               allowDirectLogin: document.getElementById('cfg-direct').checked,
+              latestVersion: document.getElementById('cfg-version').value.trim(),
+              customUserAgent: document.getElementById('cfg-ua').value.trim(),
+              updateUrl: document.getElementById('cfg-update-url').value.trim(),
+              updateNotes: document.getElementById('cfg-update-notes').value.trim(),
+              m3uProxyUrl: document.getElementById('cfg-proxy').value.trim(),
               updatedAt: serverTimestamp(),
               updatedBy: state.user.uid,
             };
