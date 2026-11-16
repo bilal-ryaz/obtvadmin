@@ -176,6 +176,7 @@
         doc,
         getDoc,
         getDocs,
+        onSnapshot,
         setDoc,
         updateDoc,
         deleteDoc,
@@ -205,6 +206,9 @@
       });
       const db = getFirestore(app);
 
+      let completingSignup = false;
+      let resellersUnsub = null;
+
       const state = {
         authReady: false,
         user: null,
@@ -218,6 +222,7 @@
         search: '',
         statusFilter: 'all',
         confirmRemoveUid: null,
+        resellerLoadError: '',
         activations: [],
         resellers: [],
         logs: [],
@@ -232,6 +237,9 @@
           updateNotes: '',
           customUserAgent: '',
           m3uProxyUrl: '',
+          adminUid: '',
+          adminEmail: '',
+          updatedBy: '',
         },
       };
 
@@ -239,6 +247,62 @@
       const modalRoot = document.getElementById('modal-root');
       const toastEl = document.getElementById('toast');
       let toastTimer = null;
+
+      function canClaimSuperAdmin() {
+        if (!state.user) return false;
+        if (!state.workspaceBootstrapped) return true;
+        const ownerUid = String(state.config.adminUid || state.config.updatedBy || '').trim();
+        return !ownerUid || ownerUid === state.user.uid;
+      }
+
+      function normalizeResellerDoc(d) {
+        const raw = d.data() || {};
+        const email = raw.email || '';
+        return {
+          id: d.id,
+          uid: raw.uid || d.id,
+          email,
+          name: raw.name || (email ? email.split('@')[0] : 'Reseller'),
+          role: raw.role === 'admin' ? 'admin' : 'reseller',
+          credits: Number(raw.credits) || 0,
+          status: String(raw.status || 'pending').trim().toLowerCase(),
+          createdAt: raw.createdAt || null,
+        };
+      }
+
+      function sortResellers(list) {
+        return list.sort((a, b) => {
+          if (a.status === 'pending' && b.status !== 'pending') return -1;
+          if (a.status !== 'pending' && b.status === 'pending') return 1;
+          return (parseDate(b.createdAt)?.getTime() || 0) - (parseDate(a.createdAt)?.getTime() || 0);
+        });
+      }
+
+      function stopResellersListener() {
+        if (resellersUnsub) {
+          resellersUnsub();
+          resellersUnsub = null;
+        }
+      }
+
+      function startResellersListener() {
+        stopResellersListener();
+        if (!state.user || !state.staff || state.staff.status !== 'active' || state.staff.role !== 'admin') {
+          return;
+        }
+        resellersUnsub = onSnapshot(
+          collection(db, 'resellers'),
+          (snap) => {
+            state.resellerLoadError = '';
+            state.resellers = sortResellers(snap.docs.map(normalizeResellerDoc));
+            render();
+          },
+          (err) => {
+            state.resellerLoadError = err.message || 'Could not listen for reseller requests.';
+            render();
+          }
+        );
+      }
 
       function markBooted() {
         window.__orbitBooted = true;
@@ -516,16 +580,16 @@
             });
 
           if (isAdmin) {
-            const resSnap = await getDocs(collection(db, 'resellers'));
-            state.resellers = resSnap.docs
-              .map((d) => ({ id: d.id, ...d.data() }))
-              .sort((a, b) => {
-                if (a.status === 'pending' && b.status !== 'pending') return -1;
-                if (a.status !== 'pending' && b.status === 'pending') return 1;
-                return (parseDate(b.createdAt)?.getTime() || 0) - (parseDate(a.createdAt)?.getTime() || 0);
-              });
+            try {
+              const resSnap = await getDocs(collection(db, 'resellers'));
+              state.resellerLoadError = '';
+              state.resellers = sortResellers(resSnap.docs.map(normalizeResellerDoc));
+            } catch (resErr) {
+              state.resellerLoadError = resErr.message || 'Could not load reseller requests.';
+            }
           } else {
             state.resellers = [];
+            state.resellerLoadError = '';
           }
 
           const logQ = isAdmin
@@ -570,13 +634,22 @@
 
       onAuthStateChanged(auth, async (user) => {
         state.user = user;
-        state.staff = null;
         state.authError = '';
         if (!user) {
+          stopResellersListener();
+          state.staff = null;
+          state.resellers = [];
+          state.resellerLoadError = '';
           state.authReady = true;
           render();
           return;
         }
+        if (completingSignup) {
+          state.authReady = true;
+          render();
+          return;
+        }
+        state.staff = null;
         try {
           const [cfgSnap, staffSnap] = await Promise.all([
             getDoc(doc(db, 'config', 'app')),
@@ -594,6 +667,7 @@
         render();
         if (state.staff && state.staff.status === 'active') {
           loadData();
+          startResellersListener();
         }
       });
 
@@ -1067,9 +1141,14 @@
                 <p class="text-xs font-mono text-[#6C8CFF] mb-1">obtv-1d03d</p>
                 <h1 class="text-2xl font-bold tracking-tight text-white">OrbitTV Reseller Portal</h1>
                 <p class="text-sm text-slate-400 mt-1">
-                  ${isSignup ? 'Request a reseller account (requires Super Admin approval).' : 'Sign in with your reseller or admin credentials.'}
+                  ${isSignup ? 'Apply as a new sub-reseller (for new resellers only).' : 'Sign in with your Super Admin or reseller credentials.'}
                 </p>
               </div>
+              ${
+                isSignup
+                  ? '<div class="mb-4 rounded-lg bg-amber-500/10 border border-amber-500/25 px-3.5 py-2.5 text-xs text-amber-200 leading-relaxed"><strong>Super Admin?</strong> Do not use Reseller Sign-Up — switch to <strong>Sign In</strong> (or sign in first to initialize/claim Super Admin access).</div>'
+                  : ''
+              }
               <form id="auth-form" class="space-y-4">
                 <div>
                   <label class="block text-xs font-medium text-slate-400 mb-1.5">Email Address</label>
@@ -1085,13 +1164,13 @@
                     : ''
                 }
                 <button type="submit" ${state.authBusy ? 'disabled' : ''} class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] disabled:opacity-50 py-2.5 text-sm font-semibold text-slate-950 transition-colors">
-                  ${state.authBusy ? 'Please wait…' : isSignup ? 'Request Account' : 'Sign In'}
+                  ${state.authBusy ? 'Please wait…' : isSignup ? 'Apply as New Reseller' : 'Sign In'}
                 </button>
               </form>
               <div class="mt-5 pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-                <span>${isSignup ? 'Already have an account?' : 'New reseller?'}</span>
+                <span>${isSignup ? 'Already have an account?' : 'New sub-reseller?'}</span>
                 <button id="toggle-auth" type="button" class="text-[#6C8CFF] hover:underline font-medium">
-                  ${isSignup ? 'Sign In' : 'Request Account'}
+                  ${isSignup ? 'Sign In' : 'Apply as Reseller'}
                 </button>
               </div>
               <p class="mt-3 text-[11px] text-slate-500">
@@ -1115,11 +1194,24 @@
           render();
           try {
             if (isSignup) {
-              const cred = await createUserWithEmailAndPassword(auth, email, pass);
-              const cfgSnap = await getDoc(doc(db, 'config', 'app'));
-              state.workspaceBootstrapped = cfgSnap.exists();
-              if (cfgSnap.exists()) {
-                state.staff = await createPendingProfile(cred.user);
+              completingSignup = true;
+              try {
+                const cred = await createUserWithEmailAndPassword(auth, email, pass);
+                const cfgSnap = await getDoc(doc(db, 'config', 'app'));
+                const cfgData = cfgSnap.exists() ? cfgSnap.data() : {};
+                state.workspaceBootstrapped = cfgSnap.exists();
+                if (cfgSnap.exists()) {
+                  state.config = { ...state.config, ...cfgData };
+                }
+                const ownerUid = String(cfgData.adminUid || cfgData.updatedBy || '').trim();
+                const allowAdminClaim = !cfgSnap.exists() || !ownerUid || ownerUid === cred.user.uid;
+                if (!allowAdminClaim) {
+                  state.staff = await createPendingProfile(cred.user);
+                } else {
+                  state.staff = null;
+                }
+              } finally {
+                completingSignup = false;
               }
             } else {
               await signInWithEmailAndPassword(auth, email, pass);
@@ -1134,25 +1226,34 @@
       }
 
       function renderOnboardingOrPending() {
-        const canBootstrap = !state.workspaceBootstrapped;
+        const allowAdminClaim = canClaimSuperAdmin();
         const hasRecord = Boolean(state.staff);
         const isPending = state.staff?.status === 'pending';
         const isDisabled = state.staff?.status === 'disabled';
 
         let title = 'Request Reseller Access';
-        if (canBootstrap) title = 'Initialize OrbitTV Portal';
-        else if (isPending) title = 'Approval Pending';
+        if (allowAdminClaim) {
+          title = !state.workspaceBootstrapped ? 'Initialize OrbitTV Portal' : 'Claim Super Admin Access';
+        } else if (isPending) title = 'Approval Pending';
         else if (isDisabled) title = 'Account Disabled';
 
         let bodyHtml = '';
-        if (canBootstrap) {
+        if (allowAdminClaim) {
+          const msg = !state.workspaceBootstrapped
+            ? 'No workspace configuration exists yet on <span class="font-mono text-[#6C8CFF]">obtv-1d03d</span>.'
+            : isPending
+              ? 'This account matches the workspace owner on <span class="font-mono text-[#6C8CFF]">obtv-1d03d</span>, so you can restore Super Admin access directly.'
+              : 'No Super Admin has claimed <span class="font-mono text-[#6C8CFF]">obtv-1d03d</span> yet.';
+          const btnLabel = isPending
+            ? 'Restore Super Admin Access'
+            : 'Initialize Workspace as Super Admin';
           bodyHtml = `
             <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-4 text-sm text-slate-300 space-y-2">
-              <p>No workspace configuration exists yet on <span class="font-mono text-[#6C8CFF]">obtv-1d03d</span>.</p>
-              <p>Initialize the portal now to claim Super Admin access and configure your default Xtream server.</p>
+              <p>${msg}</p>
+              <p>Click below to activate full Super Admin permissions for <span class="text-white font-medium">${esc(state.user.email)}</span>.</p>
             </div>
             <button id="btn-bootstrap" type="button" class="w-full rounded-lg bg-[#6C8CFF] hover:bg-[#5A7BF0] py-2.5 text-sm font-semibold text-slate-950">
-              Initialize Workspace as Super Admin
+              ${btnLabel}
             </button>
           `;
         } else if (!hasRecord) {
@@ -1171,13 +1272,23 @@
           `;
         } else if (isPending) {
           bodyHtml = `
-            <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-4 text-sm text-slate-300 space-y-2">
+            <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-4 text-sm text-slate-300 space-y-3">
               <p>Your reseller access request is waiting for Super Admin approval.</p>
-              <p class="text-xs text-slate-400">Once approved, use the link below to open your dashboard.</p>
+              <p class="text-xs text-slate-400">Your request appears live on the Super Admin dashboard under <strong>Resellers → Pending Requests</strong>.</p>
+              <div class="flex items-center gap-2 pt-1">
+                <code class="flex-1 rounded bg-[#131722] border border-slate-700 px-3 py-2 text-xs font-mono text-slate-200 select-all">${esc(state.user.uid)}</code>
+                <button id="copy-uid" type="button" class="px-3 py-2 rounded border border-slate-700 text-xs text-slate-200 hover:bg-slate-800">Copy UID</button>
+              </div>
             </div>
             <button id="btn-check-status" type="button" class="text-sm font-medium text-[#6C8CFF] hover:underline">
               Check approval status
             </button>
+            <details class="rounded-lg bg-[#0B0D12] border border-slate-800/80 p-3 text-xs text-slate-400">
+              <summary class="cursor-pointer font-medium text-slate-300">Are you the Super Admin using a different email?</summary>
+              <p class="mt-2 leading-relaxed">
+                Sign in with your original Super Admin email, or open Firebase Console → Firestore → <code class="text-slate-200">resellers/${esc(state.user.uid)}</code> and set <code class="text-slate-200">role: "admin"</code>, <code class="text-slate-200">status: "active"</code>, <code class="text-slate-200">credits: 9999</code>.
+              </p>
+            </details>
           `;
         } else {
           bodyHtml = `
@@ -1249,19 +1360,30 @@
         if (bootBtn) {
           bootBtn.onclick = async () => {
             bootBtn.disabled = true;
-            bootBtn.textContent = 'Initializing…';
+            bootBtn.textContent = 'Activating…';
             try {
-              const adminName = state.user.email ? state.user.email.split('@')[0] : 'Admin';
+              const adminName = state.staff?.name || (state.user.email ? state.user.email.split('@')[0] : 'Admin');
               const batch = writeBatch(db);
-              batch.set(doc(db, 'config', 'app'), {
-                appName: 'OrbitTV',
-                defaultServer: '',
-                allowDirectLogin: true,
-                announcement: '',
-                supportContact: '',
-                updatedAt: serverTimestamp(),
-                updatedBy: state.user.uid,
-              });
+              batch.set(
+                doc(db, 'config', 'app'),
+                {
+                  appName: state.config.appName || 'OrbitTV',
+                  defaultServer: state.config.defaultServer || '',
+                  allowDirectLogin: state.config.allowDirectLogin !== false,
+                  announcement: state.config.announcement || '',
+                  supportContact: state.config.supportContact || '',
+                  latestVersion: state.config.latestVersion || '',
+                  updateUrl: state.config.updateUrl || '',
+                  updateNotes: state.config.updateNotes || '',
+                  customUserAgent: state.config.customUserAgent || '',
+                  m3uProxyUrl: state.config.m3uProxyUrl || '',
+                  adminUid: state.user.uid,
+                  adminEmail: state.user.email || '',
+                  updatedAt: serverTimestamp(),
+                  updatedBy: state.user.uid,
+                },
+                { merge: true }
+              );
               batch.set(doc(db, 'resellers', state.user.uid), {
                 uid: state.user.uid,
                 email: state.user.email || '',
@@ -1269,11 +1391,17 @@
                 role: 'admin',
                 credits: 9999,
                 status: 'active',
-                createdAt: serverTimestamp(),
+                createdAt: state.staff?.createdAt || serverTimestamp(),
                 updatedAt: serverTimestamp(),
               });
               await batch.commit();
               state.workspaceBootstrapped = true;
+              state.config = {
+                ...state.config,
+                adminUid: state.user.uid,
+                adminEmail: state.user.email || '',
+                updatedBy: state.user.uid,
+              };
               state.staff = {
                 uid: state.user.uid,
                 email: state.user.email || '',
@@ -1282,14 +1410,15 @@
                 credits: 9999,
                 status: 'active',
               };
-              await writeLog('bootstrap_admin', `Initialized workspace as Super Admin (${state.user.email})`);
-              showToast('Workspace initialized');
+              await writeLog('bootstrap_admin', `Claimed Super Admin access (${state.user.email})`);
+              showToast('Super Admin access activated');
               render();
               loadData();
+              startResellersListener();
             } catch (err) {
-              showToast(err.message || 'Bootstrap failed. Check Firestore rules.');
+              showToast(err.message || 'Super Admin activation failed. Ensure updated Firestore rules are published.');
               bootBtn.disabled = false;
-              bootBtn.textContent = 'Initialize Workspace as Super Admin';
+              bootBtn.textContent = isPending ? 'Restore Super Admin Access' : 'Initialize Workspace as Super Admin';
             }
           };
         }
@@ -1389,7 +1518,23 @@
                 })
                 .join('');
 
+        const pendingCount = state.staff.role === 'admin' ? state.resellers.filter((r) => r.status === 'pending').length : 0;
+        const pendingBannerHtml =
+          state.staff.role === 'admin' && pendingCount > 0
+            ? `
+              <div class="mb-5 rounded-xl bg-amber-500/10 border border-amber-500/30 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div class="text-xs text-amber-200">
+                  <span class="font-semibold text-amber-300">${pendingCount} pending reseller ${pendingCount === 1 ? 'request' : 'requests'}</span> waiting for your approval.
+                </div>
+                <button type="button" id="btn-review-pending" class="px-3 py-1.5 rounded-lg bg-amber-400 text-slate-950 text-xs font-semibold hover:bg-amber-300 shrink-0">
+                  Review Requests
+                </button>
+              </div>
+            `
+            : '';
+
         return `
+          ${pendingBannerHtml}
           <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
               <div class="text-xs text-slate-400">Total Activations</div>
@@ -1476,39 +1621,45 @@
         const pendingList = state.resellers.filter((r) => r.status === 'pending');
         const staffList = state.resellers.filter((r) => r.status !== 'pending');
 
-        const pendingSection =
-          pendingList.length === 0
-            ? ''
-            : `
-              <div class="mb-6 rounded-xl bg-[#131722] border border-amber-500/30 overflow-hidden">
-                <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-                  <h3 class="text-sm font-semibold text-amber-300">Pending Requests (${pendingList.length})</h3>
-                  <span class="text-xs text-slate-400">Review and approve or reject new reseller sign-ups</span>
-                </div>
-                <div class="divide-y divide-slate-800/70">
-                  ${pendingList
-                    .map(
-                      (r) => `
-                    <div class="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div>
-                        <div class="text-sm font-medium text-white">${esc(r.name)} <span class="text-xs text-slate-400">· ${esc(r.email)}</span></div>
-                        <div class="text-xs font-mono text-slate-500 mt-0.5">${esc(r.uid)}</div>
+        const pendingSection = `
+          ${
+            state.resellerLoadError
+              ? `<div class="mb-4 rounded-xl bg-red-950/60 border border-red-800/70 px-4 py-3 text-xs text-red-200">Could not load reseller requests from Firestore: ${esc(state.resellerLoadError)}</div>`
+              : ''
+          }
+          <div class="mb-6 rounded-xl bg-[#131722] border border-amber-500/30 overflow-hidden">
+            <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+              <h3 class="text-sm font-semibold text-amber-300">Pending Requests (${pendingList.length})</h3>
+              <span class="text-xs text-slate-400">New reseller sign-ups appear here live for approval</span>
+            </div>
+            ${
+              pendingList.length === 0
+                ? '<div class="px-4 py-6 text-center text-xs text-slate-500">No pending reseller requests right now.</div>'
+                : `<div class="divide-y divide-slate-800/70">
+                    ${pendingList
+                      .map(
+                        (r) => `
+                      <div class="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <div class="text-sm font-medium text-white">${esc(r.name)} <span class="text-xs text-slate-400">· ${esc(r.email)}</span></div>
+                          <div class="text-xs font-mono text-slate-500 mt-0.5">${esc(r.uid)}</div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                          <button type="button" data-approve-reseller="${esc(r.uid)}" class="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-xs font-semibold">
+                            Approve (+25 Credits)
+                          </button>
+                          <button type="button" data-reject-reseller="${esc(r.uid)}" class="px-3 py-1.5 rounded-lg bg-red-500/20 text-red-300 hover:bg-red-500/30 text-xs font-medium">
+                            Reject
+                          </button>
+                        </div>
                       </div>
-                      <div class="flex items-center gap-2 shrink-0">
-                        <button type="button" data-approve-reseller="${esc(r.uid)}" class="px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-xs font-semibold">
-                          Approve (+25 Credits)
-                        </button>
-                        <button type="button" data-reject-reseller="${esc(r.uid)}" class="px-3 py-1.5 rounded-lg bg-red-500/20 text-red-300 hover:bg-red-500/30 text-xs font-medium">
-                          Reject
-                        </button>
-                      </div>
-                    </div>
-                  `
-                    )
-                    .join('')}
-                </div>
-              </div>
-            `;
+                    `
+                      )
+                      .join('')}
+                  </div>`
+            }
+          </div>
+        `;
 
         const rowsHtml =
           staffList.length === 0
@@ -1765,6 +1916,13 @@
 
         document.getElementById('btn-signout').onclick = () => signOut(auth);
         document.getElementById('btn-refresh').onclick = () => loadData();
+        const reviewPendingBtn = document.getElementById('btn-review-pending');
+        if (reviewPendingBtn) {
+          reviewPendingBtn.onclick = () => {
+            state.tab = 'resellers';
+            render();
+          };
+        }
         document.querySelectorAll('[data-tab]').forEach((btn) => {
           btn.onclick = () => {
             state.tab = btn.dataset.tab;
@@ -2094,6 +2252,8 @@
               updateUrl: document.getElementById('cfg-update-url').value.trim(),
               updateNotes: document.getElementById('cfg-update-notes').value.trim(),
               m3uProxyUrl: document.getElementById('cfg-proxy').value.trim(),
+              adminUid: state.config.adminUid || state.user.uid,
+              adminEmail: state.config.adminEmail || state.user.email || '',
               updatedAt: serverTimestamp(),
               updatedBy: state.user.uid,
             };
