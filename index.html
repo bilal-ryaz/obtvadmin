@@ -295,6 +295,8 @@
       }
 
       function isExpired(item) {
+        const ps = (item.panelStatus || '').trim().toLowerCase();
+        if (ps === 'expired') return true;
         const d = parseDate(item.expiresAt);
         return d !== null && d.getTime() < Date.now();
       }
@@ -308,8 +310,120 @@
 
       function effectiveStatus(item) {
         if (item.status === 'suspended') return 'suspended';
+        const ps = (item.panelStatus || '').trim().toLowerCase();
+        if (ps === 'disabled' || ps === 'banned') return 'suspended';
         if (isExpired(item)) return 'expired';
         return 'active';
+      }
+
+      function formatRemaining(item) {
+        const exp = parseDate(item.expiresAt);
+        if (!exp) {
+          if (item.panelSyncedAt) return 'Unlimited';
+          return item.expirySource === 'manual' ? 'No expiry' : 'Syncs on app login';
+        }
+        const diff = exp.getTime() - Date.now();
+        if (diff < 0) {
+          const days = Math.floor(Math.abs(diff) / 86400000);
+          return days >= 1 ? `Expired ${days}d ago` : 'Expired';
+        }
+        const days = Math.floor(diff / 86400000);
+        if (days >= 1) return `${days}d left`;
+        const hours = Math.max(1, Math.floor(diff / 3600000));
+        return `${hours}h left`;
+      }
+
+      function detectPlanFromPanelInfo(ui) {
+        const rawTrial = String(ui.is_trial ?? '').trim().toLowerCase();
+        const isTrial = rawTrial === '1' || rawTrial === 'true';
+
+        const rawExp = String(ui.exp_date ?? '').trim();
+        const expSec = rawExp && rawExp.toLowerCase() !== 'null' ? Number(rawExp) : 0;
+        const expiresAt = Number.isFinite(expSec) && expSec > 0 ? new Date(expSec * 1000) : null;
+
+        const rawCreated = String(ui.created_at ?? '').trim();
+        const createdSec =
+          rawCreated && rawCreated.toLowerCase() !== 'null' ? Number(rawCreated) : 0;
+        const createdAt =
+          Number.isFinite(createdSec) && createdSec > 0 ? new Date(createdSec * 1000) : null;
+
+        let panelStatus = String(ui.status ?? '').trim().toLowerCase();
+        if ((!panelStatus || panelStatus === 'active') && expiresAt && expiresAt.getTime() < Date.now()) {
+          panelStatus = 'expired';
+        }
+        if (!panelStatus) panelStatus = 'active';
+
+        let planLabel = isTrial ? 'Trial' : 'Lifetime';
+        if (expiresAt) {
+          const refStart =
+            createdAt && expiresAt.getTime() > createdAt.getTime() ? createdAt : new Date();
+          const diffMs = expiresAt.getTime() - refStart.getTime();
+          if (diffMs < 0) {
+            planLabel = isTrial ? 'Trial' : 'Subscription';
+          } else {
+            const hours = Math.floor(diffMs / 3600000);
+            const days = Math.round(hours / 24);
+            if (isTrial) {
+              if (hours <= 2) planLabel = `${Math.max(1, hours)}h Trial`;
+              else if (hours <= 26) planLabel = '24h Trial';
+              else if (hours <= 50) planLabel = '48h Trial';
+              else if (hours <= 74) planLabel = '72h Trial';
+              else if (days <= 14) planLabel = `${days}d Trial`;
+              else planLabel = 'Trial';
+            } else if (hours <= 26) planLabel = '24h Pass';
+            else if (hours <= 50) planLabel = '48h Pass';
+            else if (days <= 10) planLabel = `${Math.max(1, days)} Days`;
+            else if (days <= 20) planLabel = '2 Weeks';
+            else if (days >= 27 && days <= 34) planLabel = '1 Month';
+            else if (days >= 56 && days <= 65) planLabel = '2 Months';
+            else if (days >= 85 && days <= 95) planLabel = '3 Months';
+            else if (days >= 175 && days <= 190) planLabel = '6 Months';
+            else if (days >= 355 && days <= 375) planLabel = '12 Months';
+            else if (days >= 30) planLabel = `${Math.round(days / 30)} Months`;
+            else planLabel = `${days} Days`;
+          }
+        }
+        return { planLabel, expiresAt, panelStatus, isTrial };
+      }
+
+      async function probeXtreamPanel(rawServer, username, password, proxyUrl) {
+        let srv = (rawServer || '').trim().replace(/\/+$/, '');
+        if (!srv) return { ok: false, reason: 'missing-server' };
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(srv)) {
+          const isHttpPort = /:(80|8000|8080|8880|2082|2086|25461)(?:[/?#]|$)/.test(srv);
+          srv = `${isHttpPort ? 'http' : 'https'}://${srv}`;
+        }
+        try {
+          srv = new URL(srv).origin;
+        } catch {
+          return { ok: false, reason: 'invalid-server' };
+        }
+        const target = `${srv}/player_api.php?username=${encodeURIComponent(
+          (username || '').trim()
+        )}&password=${encodeURIComponent((password || '').trim())}`;
+        const cleanProxy = (proxyUrl || '').trim();
+        const isMixed =
+          window.location.protocol === 'https:' && target.startsWith('http://');
+        if (isMixed && !cleanProxy) {
+          return { ok: false, reason: 'mixed-content' };
+        }
+        const fetchUrl = cleanProxy ? `${cleanProxy}${encodeURIComponent(target)}` : target;
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 6000);
+        try {
+          const res = await fetch(fetchUrl, { signal: ctl.signal });
+          if (!res.ok) return { ok: false, reason: `http-${res.status}` };
+          const data = await res.json();
+          const ui = data && typeof data === 'object' ? data.user_info : null;
+          if (!ui || typeof ui !== 'object') {
+            return { ok: false, reason: 'no-user-info' };
+          }
+          return { ok: true, ...detectPlanFromPanelInfo(ui) };
+        } catch {
+          return { ok: false, reason: 'cors-or-network' };
+        } finally {
+          clearTimeout(timer);
+        }
       }
 
       function addDurationToDate(baseDate, months, hours = 0) {
@@ -491,6 +605,7 @@
       function openActivationModal(existing = null) {
         const isEdit = Boolean(existing);
         const code = existing ? existing.code : generateCode();
+        const initSource = existing?.expirySource === 'manual' ? 'manual' : 'auto';
         const defaultExpiry = existing
           ? formatDate(existing.expiresAt)
           : formatDate(addDurationToDate(new Date(), 1));
@@ -587,29 +702,53 @@
                 />
               </div>
 
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Plan Preset</label>
+              <div class="rounded-lg bg-[#0B0D12] border border-slate-800 p-3.5 space-y-3">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <div class="text-xs font-medium text-slate-200">Subscription &amp; Expiry Tracking</div>
+                    <div id="f-source-hint" class="text-[11px] text-slate-400 mt-0.5">
+                      ${
+                        initSource === 'auto'
+                          ? 'Duration (Trial / 1M / 12M) &amp; expiry auto-sync from your IPTV panel.'
+                          : 'Enforce a manual expiry date in OrbitTV.'
+                      }
+                    </div>
+                  </div>
                   <select
-                    id="f-plan"
-                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                    id="f-expiry-source"
+                    class="rounded-lg bg-[#131722] border border-slate-700 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#6C8CFF]"
                   >
-                    <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
-                    <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
-                    <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
-                    <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
-                    <option value="12 Months" ${existing?.planLabel === '12 Months' ? 'selected' : ''}>12 Months</option>
-                    <option value="Custom" ${existing?.planLabel === 'Custom' ? 'selected' : ''}>Custom</option>
+                    <option value="auto" ${initSource === 'auto' ? 'selected' : ''}>Auto (IPTV Panel)</option>
+                    <option value="manual" ${initSource === 'manual' ? 'selected' : ''}>Manual Override</option>
                   </select>
                 </div>
-                <div>
-                  <label class="block text-xs font-medium text-slate-400 mb-1.5">Expiration Date</label>
-                  <input
-                    id="f-expiry"
-                    type="date"
-                    value="${esc(defaultExpiry === 'No expiry' ? '' : defaultExpiry)}"
-                    class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm tabular-nums text-white focus:outline-none focus:border-[#6C8CFF]"
-                  />
+
+                <div id="f-manual-box" class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 ${
+                  initSource === 'manual' ? '' : 'hidden'
+                }">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Plan Preset</label>
+                    <select
+                      id="f-plan"
+                      class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
+                    >
+                      <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
+                      <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
+                      <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
+                      <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
+                      <option value="12 Months" ${existing?.planLabel === '12 Months' ? 'selected' : ''}>12 Months</option>
+                      <option value="Custom" ${existing?.planLabel === 'Custom' ? 'selected' : ''}>Custom</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1.5">Expiration Date</label>
+                    <input
+                      id="f-expiry"
+                      type="date"
+                      value="${esc(defaultExpiry === 'No expiry' ? '' : defaultExpiry)}"
+                      class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm tabular-nums text-white focus:outline-none focus:border-[#6C8CFF]"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -646,8 +785,23 @@
           };
         }
 
+        const sourceSel = document.getElementById('f-expiry-source');
+        const manualBox = document.getElementById('f-manual-box');
+        const sourceHint = document.getElementById('f-source-hint');
         const planSel = document.getElementById('f-plan');
         const expInput = document.getElementById('f-expiry');
+
+        sourceSel.onchange = () => {
+          const isManual = sourceSel.value === 'manual';
+          manualBox.classList.toggle('hidden', !isManual);
+          sourceHint.textContent = isManual
+            ? 'Enforce a manual expiry date in OrbitTV.'
+            : 'Duration (Trial / 1M / 12M) & expiry auto-sync from your IPTV panel.';
+          if (isManual && !expInput.value) {
+            expInput.value = formatDate(addDurationToDate(new Date(), 1));
+          }
+        };
+
         planSel.onchange = () => {
           const val = planSel.value;
           const now = new Date();
@@ -665,18 +819,60 @@
           saveBtn.textContent = 'Saving…';
 
           const cleanCode = document.getElementById('f-code').value.trim().toUpperCase();
-          const expRaw = document.getElementById('f-expiry').value;
-          const expDate = expRaw ? new Date(`${expRaw}T23:59:59`) : null;
+          const expirySource = sourceSel.value === 'manual' ? 'manual' : 'auto';
+          const isManual = expirySource === 'manual';
+          const expRaw = expInput.value;
+          const expDate = isManual && expRaw ? new Date(`${expRaw}T23:59:59`) : null;
+          const srvVal = document.getElementById('f-server').value.trim();
+          const userVal = document.getElementById('f-user').value.trim();
+          const passVal = document.getElementById('f-pass').value.trim();
+
+          let resolvedPlan = isManual
+            ? planSel.value
+            : existing?.planLabel && existing.planLabel !== 'Pending Sync'
+              ? existing.planLabel
+              : 'Pending Sync';
+          let resolvedExpiry = expDate
+            ? Timestamp.fromDate(expDate)
+            : !isManual && existing?.expiresAt
+              ? parseDate(existing.expiresAt)
+                ? Timestamp.fromDate(parseDate(existing.expiresAt))
+                : null
+              : null;
+          let extraPanelFields = {};
+
+          if (!isManual) {
+            const effectiveSrv = srvVal || state.config.defaultServer || '';
+            if (effectiveSrv && userVal && passVal) {
+              const probe = await probeXtreamPanel(
+                effectiveSrv,
+                userVal,
+                passVal,
+                state.config.m3uProxyUrl
+              );
+              if (probe.ok) {
+                resolvedPlan = probe.planLabel;
+                resolvedExpiry = probe.expiresAt ? Timestamp.fromDate(probe.expiresAt) : null;
+                extraPanelFields = {
+                  panelStatus: probe.panelStatus,
+                  isTrial: probe.isTrial,
+                  panelSyncedAt: serverTimestamp(),
+                };
+              }
+            }
+          }
 
           const payload = {
             code: cleanCode,
             customerName: document.getElementById('f-customer').value.trim(),
-            server: document.getElementById('f-server').value.trim(),
-            username: document.getElementById('f-user').value.trim(),
-            password: document.getElementById('f-pass').value.trim(),
-            planLabel: document.getElementById('f-plan').value,
+            server: srvVal,
+            username: userVal,
+            password: passVal,
+            planLabel: resolvedPlan,
             status: existing ? existing.status : 'active',
-            expiresAt: expDate ? Timestamp.fromDate(expDate) : null,
+            expiresAt: resolvedExpiry,
+            expirySource,
+            ...extraPanelFields,
             maxDevices: Math.max(1, Math.min(10, Math.floor(Number(document.getElementById('f-devices').value) || 1))),
             boundDevices: existing?.boundDevices || [],
             resellerUid: existing ? existing.resellerUid : state.user.uid,
@@ -721,7 +917,11 @@
                 state.staff.credits = Math.max(0, (state.staff.credits || 0) - 1);
               }
               await writeLog('create_activation', `Issued ${payload.planLabel} for ${payload.customerName}`, cleanCode);
-              showToast(`Created activation ${cleanCode}`);
+              showToast(
+                resolvedPlan === 'Pending Sync'
+                  ? `Created ${cleanCode} — duration syncs automatically on first app login`
+                  : `Created ${cleanCode} (${resolvedPlan})`
+              );
             }
             closeModal();
             await loadData();
@@ -1099,6 +1299,7 @@
         const list = filteredActivations();
         const total = state.activations.length;
         const activeCount = state.activations.filter((a) => effectiveStatus(a) === 'active').length;
+        const expiredCount = state.activations.filter((a) => effectiveStatus(a) === 'expired').length;
         const soonCount = state.activations.filter((a) => effectiveStatus(a) === 'active' && isExpiringSoon(a)).length;
 
         const rowsHtml =
@@ -1120,8 +1321,19 @@
                       ? 'Active'
                       : st === 'expired'
                         ? 'Expired'
-                        : 'Suspended';
+                        : item.status === 'suspended'
+                          ? 'Suspended'
+                          : 'Panel Disabled';
                   const bound = Array.isArray(item.boundDevices) ? item.boundDevices.length : 0;
+                  const planTitle =
+                    item.planLabel === 'Pending Sync'
+                      ? 'Auto (IPTV Panel)'
+                      : item.planLabel || 'Standard';
+                  const showTrialBadge =
+                    item.isTrial && !planTitle.toLowerCase().includes('trial');
+                  const expiryLine = item.expiresAt
+                    ? `${formatDate(item.expiresAt)} · ${formatRemaining(item)}`
+                    : formatRemaining(item);
                   return `
                     <tr class="hover:bg-slate-800/30">
                       <td class="py-3 px-4">
@@ -1141,8 +1353,15 @@
                         <div class="text-xs text-slate-500 truncate max-w-[180px]">${esc(item.server || 'Global Default Server')}</div>
                       </td>
                       <td class="py-3 px-4">
-                        <div class="text-xs text-slate-200">${esc(item.planLabel || 'Standard')}</div>
-                        <div class="text-xs tabular-nums text-slate-400">${esc(formatDate(item.expiresAt))}</div>
+                        <div class="text-xs text-slate-200 flex items-center gap-1.5">
+                          <span>${esc(planTitle)}</span>
+                          ${
+                            showTrialBadge
+                              ? '<span class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 text-[10px] font-medium">Trial</span>'
+                              : ''
+                          }
+                        </div>
+                        <div class="text-xs tabular-nums text-slate-400">${esc(expiryLine)}</div>
                       </td>
                       <td class="py-3 px-4 tabular-nums text-xs text-slate-300">
                         ${bound} / ${esc(item.maxDevices || 1)}
@@ -1154,7 +1373,11 @@
                       </td>
                       <td class="py-3 px-4 text-xs font-medium ${stClass}">${stLabel}</td>
                       <td class="py-3 px-4 text-right whitespace-nowrap space-x-2 text-xs">
-                        <button type="button" data-extend="${esc(item.code)}" class="text-slate-300 hover:text-white">+1M</button>
+                        ${
+                          item.expirySource === 'manual'
+                            ? `<button type="button" data-extend="${esc(item.code)}" class="text-slate-300 hover:text-white">+1M</button>`
+                            : `<button type="button" data-sync="${esc(item.code)}" class="text-slate-300 hover:text-white" title="Check IPTV panel subscription now">Sync</button>`
+                        }
                         <button type="button" data-edit="${esc(item.code)}" class="text-[#6C8CFF] hover:underline">Edit</button>
                         <button type="button" data-toggle-status="${esc(item.code)}" class="${
                           item.status === 'suspended' ? 'text-emerald-400' : 'text-amber-400'
@@ -1177,8 +1400,9 @@
               <div class="text-2xl font-bold tabular-nums text-emerald-400 mt-1">${activeCount}</div>
             </div>
             <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
-              <div class="text-xs text-slate-400">Expiring Within 7 Days</div>
-              <div class="text-2xl font-bold tabular-nums text-amber-400 mt-1">${soonCount}</div>
+              <div class="text-xs text-slate-400">Expired Subscriptions</div>
+              <div class="text-2xl font-bold tabular-nums text-amber-400 mt-1">${expiredCount}</div>
+              <div class="text-[11px] text-slate-500 mt-0.5 tabular-nums">${soonCount} expiring within 7d</div>
             </div>
             <div class="rounded-xl bg-[#131722] border border-slate-800 p-4">
               <div class="text-xs text-slate-400">${state.staff.role === 'admin' ? 'Role' : 'Available Credits'}</div>
@@ -1199,15 +1423,19 @@
               />
               <div class="inline-flex rounded-lg bg-[#131722] border border-slate-800 p-1">
                 ${['all', 'active', 'expired', 'suspended']
-                  .map(
-                    (st) => `
+                  .map((st) => {
+                    const c =
+                      st === 'all'
+                        ? total
+                        : state.activations.filter((a) => effectiveStatus(a) === st).length;
+                    return `
                   <button type="button" data-status-filter="${st}" class="px-3 py-1 rounded-md text-xs font-medium capitalize transition-colors ${
                     state.statusFilter === st
                       ? 'bg-[#6C8CFF] text-slate-950'
                       : 'text-slate-400 hover:text-white'
-                  }">${st}</button>
-                `
-                  )
+                  }">${st} (${c})</button>
+                `;
+                  })
                   .join('')}
               </div>
             </div>
@@ -1621,6 +1849,35 @@
           btn.onclick = () => {
             const item = state.activations.find((a) => a.code === btn.dataset.edit);
             if (item) openActivationModal(item);
+          };
+        });
+
+        document.querySelectorAll('[data-sync]').forEach((btn) => {
+          btn.onclick = async () => {
+            const code = btn.dataset.sync;
+            const item = state.activations.find((a) => a.code === code);
+            if (!item) return;
+            const srv = item.server || state.config.defaultServer || '';
+            const probe = await probeXtreamPanel(srv, item.username, item.password, state.config.m3uProxyUrl);
+            if (!probe.ok) {
+              showToast('Browser blocked direct HTTP/CORS check — app auto-syncs this on customer sign-in');
+              return;
+            }
+            try {
+              await updateDoc(doc(db, 'activations', code), {
+                planLabel: probe.planLabel,
+                expiresAt: probe.expiresAt ? Timestamp.fromDate(probe.expiresAt) : null,
+                expirySource: 'auto',
+                panelStatus: probe.panelStatus,
+                isTrial: probe.isTrial,
+                panelSyncedAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              showToast(`Synced ${code}: ${probe.planLabel} (${probe.panelStatus})`);
+              await loadData();
+            } catch (err) {
+              showToast(err.message || 'Sync failed');
+            }
           };
         });
 
