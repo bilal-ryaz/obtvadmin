@@ -464,12 +464,7 @@
             const hours = Math.floor(diffMs / 3600000);
             const days = Math.round(hours / 24);
             if (isTrial) {
-              if (hours <= 2) planLabel = `${Math.max(1, hours)}h Trial`;
-              else if (hours <= 26) planLabel = '24h Trial';
-              else if (hours <= 50) planLabel = '48h Trial';
-              else if (hours <= 74) planLabel = '72h Trial';
-              else if (days <= 14) planLabel = `${days}d Trial`;
-              else planLabel = 'Trial';
+              planLabel = 'Trial';
             } else if (hours <= 26) planLabel = '24h Pass';
             else if (hours <= 50) planLabel = '48h Pass';
             else if (days <= 10) planLabel = `${Math.max(1, days)} Days`;
@@ -855,7 +850,7 @@
                       id="f-plan"
                       class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
                     >
-                      <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
+                      <option value="Trial" ${(existing?.planLabel || '').toLowerCase().includes('trial') ? 'selected' : ''}>Trial</option>
                       <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
                       <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
                       <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
@@ -928,7 +923,7 @@
         planSel.onchange = () => {
           const val = planSel.value;
           const now = new Date();
-          if (val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
+          if (val === 'Trial' || val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
           else if (val === '1 Month') expInput.value = formatDate(addDurationToDate(now, 1));
           else if (val === '3 Months') expInput.value = formatDate(addDurationToDate(now, 3));
           else if (val === '6 Months') expInput.value = formatDate(addDurationToDate(now, 6));
@@ -1192,7 +1187,7 @@
                       id="d-plan"
                       class="w-full rounded-lg bg-[#131722] border border-slate-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-[#6C8CFF]"
                     >
-                      <option value="24h Trial" ${existing?.planLabel === '24h Trial' ? 'selected' : ''}>24h Trial</option>
+                      <option value="Trial" ${(existing?.planLabel || '').toLowerCase().includes('trial') ? 'selected' : ''}>Trial</option>
                       <option value="1 Month" ${!existing || existing?.planLabel === '1 Month' ? 'selected' : ''}>1 Month</option>
                       <option value="3 Months" ${existing?.planLabel === '3 Months' ? 'selected' : ''}>3 Months</option>
                       <option value="6 Months" ${existing?.planLabel === '6 Months' ? 'selected' : ''}>6 Months</option>
@@ -1275,7 +1270,7 @@
         planSel.onchange = () => {
           const val = planSel.value;
           const now = new Date();
-          if (val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
+          if (val === 'Trial' || val === '24h Trial') expInput.value = formatDate(addDurationToDate(now, 0, 24));
           else if (val === '1 Month') expInput.value = formatDate(addDurationToDate(now, 1));
           else if (val === '3 Months') expInput.value = formatDate(addDurationToDate(now, 3));
           else if (val === '6 Months') expInput.value = formatDate(addDurationToDate(now, 6));
@@ -1883,7 +1878,9 @@
                   const planTitle =
                     item.planLabel === 'Pending Sync'
                       ? 'Auto (IPTV Panel)'
-                      : item.planLabel || 'Standard';
+                      : (item.planLabel || '').toLowerCase().includes('trial')
+                        ? 'Trial'
+                        : item.planLabel || 'Standard';
                   const showTrialBadge =
                     item.isTrial && !planTitle.toLowerCase().includes('trial');
                   const expiryLine = item.expiresAt
@@ -2075,7 +2072,9 @@
                   const planTitle =
                     item.planLabel === 'Pending Sync'
                       ? 'Auto (IPTV Panel)'
-                      : item.planLabel || 'Standard';
+                      : (item.planLabel || '').toLowerCase().includes('trial')
+                        ? 'Trial'
+                        : item.planLabel || 'Standard';
                   const showTrialBadge =
                     item.isTrial && !planTitle.toLowerCase().includes('trial');
                   const expiryLine = item.expiresAt
