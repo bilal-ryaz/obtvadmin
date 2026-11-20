@@ -334,9 +334,62 @@
       }
 
       function formatMacAddress(raw) {
-        const clean = normalizeMacId(raw).toUpperCase();
-        if (clean.length !== 12) return String(raw || '').trim().toUpperCase();
+        const clean = normalizeMacId(raw).toUpperCase().slice(0, 12);
+        if (!clean.length) return '';
         return clean.match(/.{1,2}/g)?.join(':') || clean;
+      }
+
+      function attachSeparatedInput(el, groupSize, maxCleanLen, separator) {
+        if (!el) return;
+        let prevVal = el.value || '';
+        el.addEventListener('input', () => {
+          let working = el.value;
+          let workingCursor = el.selectionStart ?? working.length;
+
+          if (
+            working.length === prevVal.length - 1 &&
+            workingCursor >= 0 &&
+            workingCursor < prevVal.length &&
+            prevVal[workingCursor] === separator
+          ) {
+            const cleanNew = working.toUpperCase().replace(/[^A-Z0-9]/g, '');
+            const cleanOld = prevVal.toUpperCase().replace(/[^A-Z0-9]/g, '');
+            if (cleanNew === cleanOld && workingCursor > 0) {
+              working = working.slice(0, workingCursor - 1) + working.slice(workingCursor);
+              workingCursor -= 1;
+            }
+          }
+
+          const cleanBefore = working
+            .slice(0, workingCursor)
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, '').length;
+
+          const clean = working
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, '')
+            .slice(0, maxCleanLen);
+
+          const parts = [];
+          for (let i = 0; i < clean.length; i += groupSize) {
+            parts.push(clean.slice(i, i + groupSize));
+          }
+          const formatted = parts.join(separator);
+          el.value = formatted;
+          prevVal = formatted;
+
+          const clampedClean = Math.min(cleanBefore, clean.length);
+          const nextCursor =
+            clampedClean === 0
+              ? 0
+              : Math.min(
+                  formatted.length,
+                  clampedClean + Math.floor((clampedClean - 1) / groupSize)
+                );
+          try {
+            el.setSelectionRange(nextCursor, nextCursor);
+          } catch {}
+        });
       }
 
       function parsePastedXtreamLink(raw) {
@@ -762,6 +815,12 @@
                     type="text"
                     value="${esc(code)}"
                     ${isEdit ? 'readonly' : ''}
+                    autocapitalize="characters"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="14"
+                    placeholder="ORBT-XXXX-XXXX"
                     required
                     class="flex-1 rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono uppercase text-white focus:outline-none focus:border-[#6C8CFF]"
                   />
@@ -913,10 +972,12 @@
 
         document.getElementById('m-close').onclick = closeModal;
         document.getElementById('m-cancel').onclick = closeModal;
+        const codeInput = document.getElementById('f-code');
+        if (!isEdit) attachSeparatedInput(codeInput, 4, 12, '-');
         const regenBtn = document.getElementById('f-regen');
         if (regenBtn) {
           regenBtn.onclick = () => {
-            document.getElementById('f-code').value = generateCode();
+            codeInput.value = generateCode();
           };
         }
 
@@ -1092,6 +1153,11 @@
                     type="text"
                     required
                     ${isEdit ? 'readonly' : ''}
+                    autocapitalize="characters"
+                    autocorrect="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                    maxlength="17"
                     value="${esc(existing?.macAddress || '')}"
                     placeholder="A4:C1:38:92:EF:01"
                     class="w-full rounded-lg bg-[#0B0D12] border border-slate-700 px-3 py-2 text-sm font-mono uppercase text-white focus:outline-none focus:border-[#6C8CFF]"
@@ -1252,6 +1318,7 @@
         document.getElementById('dm-cancel').onclick = closeModal;
 
         const macInput = document.getElementById('d-mac');
+        if (!isEdit) attachSeparatedInput(macInput, 2, 12, ':');
         macInput.onblur = () => {
           macInput.value = formatMacAddress(macInput.value);
         };
